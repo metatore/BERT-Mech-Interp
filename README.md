@@ -70,6 +70,19 @@ The dashboard uses progressive disclosure:
 Why query-level first:
 - This is a ranking task, so the natural unit for diagnosis is query-level ordering, then candidate-level drill-down.
 
+## Dashboard at a glance
+Overview and top-level navigation:
+
+![Dashboard overview](docs/images/dashboard_overview.png)
+
+Category -> query -> query-item drill-down:
+
+![Dashboard drilldown](docs/images/dashboard_drilldown.png)
+
+Token attribution + attention diagnostics for the selected query-item pair:
+
+![Dashboard diagnostics](docs/images/dashboard_diagnostics.png)
+
 ## Ground truth and scoring semantics
 Ground-truth mapping from ESCI:
 - `Exact` = 3
