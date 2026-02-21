@@ -20,11 +20,103 @@ def _safe_float(x: object, default: float = 0.0) -> float:
         return default
 
 
+def _normalize_esci_label(label: object) -> str:
+    mapping = {
+        "e": "Exact",
+        "s": "Substitute",
+        "c": "Complement",
+        "i": "Irrelevant",
+        "exact": "Exact",
+        "substitute": "Substitute",
+        "complement": "Complement",
+        "irrelevant": "Irrelevant",
+    }
+    key = str(label).strip().lower()
+    return mapping.get(key, str(label).strip())
+
+
+def _compute_absolute_metrics(scored: pd.DataFrame) -> tuple[dict[str, object], list[dict[str, object]], list[dict[str, object]]]:
+    if scored.empty:
+        return {}, [], []
+
+    exact_threshold = 0.9
+    irrelevant_high_threshold = 0.9
+
+    tmp = scored.copy()
+    tmp["label_norm"] = tmp["esci_label"].map(_normalize_esci_label)
+    tmp["score"] = tmp["score"].map(_safe_float)
+
+    is_exact = tmp["label_norm"] == "Exact"
+    pred_exact = tmp["score"] >= exact_threshold
+    is_non_exact = ~is_exact
+
+    tp = int((pred_exact & is_exact).sum())
+    fn = int((~pred_exact & is_exact).sum())
+    fp = int((pred_exact & is_non_exact).sum())
+    tn = int((~pred_exact & is_non_exact).sum())
+    precision = float(tp / (tp + fp)) if (tp + fp) else 0.0
+    recall = float(tp / (tp + fn)) if (tp + fn) else 0.0
+    specificity = float(tn / (tn + fp)) if (tn + fp) else 0.0
+    f1 = float((2 * precision * recall) / (precision + recall)) if (precision + recall) else 0.0
+
+    irr = tmp[tmp["label_norm"] == "Irrelevant"]
+    irr_count = int(len(irr))
+    irr_high_count = int((irr["score"] >= irrelevant_high_threshold).sum())
+    irr_high_rate = float(irr_high_count / irr_count) if irr_count else 0.0
+
+    summary = {
+        "exact_threshold": exact_threshold,
+        "irrelevant_high_threshold": irrelevant_high_threshold,
+        "tp": tp,
+        "fn": fn,
+        "fp": fp,
+        "tn": tn,
+        "precision_exact": precision,
+        "recall_exact": recall,
+        "specificity_non_exact": specificity,
+        "f1_exact": f1,
+        "irrelevant_high_score_count": irr_high_count,
+        "irrelevant_high_score_rate": irr_high_rate,
+    }
+
+    order = {"Exact": 0, "Substitute": 1, "Complement": 2, "Irrelevant": 3}
+    rows = []
+    for lbl, part in tmp.groupby("label_norm"):
+        rows.append(
+            {
+                "label_norm": lbl,
+                "count": int(len(part)),
+                "mean": float(part["score"].mean()),
+                "min": float(part["score"].min()),
+                "p25": float(part["score"].quantile(0.25)),
+                "p50": float(part["score"].quantile(0.50)),
+                "p75": float(part["score"].quantile(0.75)),
+                "p90": float(part["score"].quantile(0.90)),
+                "max": float(part["score"].max()),
+            }
+        )
+    label_summary = sorted(rows, key=lambda r: order.get(str(r["label_norm"]), 999))
+    points = []
+    for _, r in tmp.iterrows():
+        points.append(
+            {
+                "label": str(r["label_norm"]),
+                "score": float(r["score"]),
+                "probe_id": str(r.get("probe_id", "")),
+                "query": str(r.get("query", "")),
+                "question_tag": str(r.get("question_tag", "")),
+            }
+        )
+    return summary, label_summary, points
+
+
 def _build_payload(outputs_dir: Path) -> dict[str, object]:
     scored = _safe_read_csv(outputs_dir / "scored_pairs.csv")
     scorecard = _safe_read_csv(outputs_dir / "question_scorecard.csv")
     attrs = _safe_read_csv(outputs_dir / "attributions_by_probe.csv")
     attn = _safe_read_csv(outputs_dir / "attention_by_probe.csv")
+    absolute_scorecard = _safe_read_csv(outputs_dir / "absolute_scorecard.csv")
+    label_score_summary = _safe_read_csv(outputs_dir / "label_score_summary.csv")
 
     if scored.empty:
         return {
@@ -34,6 +126,9 @@ def _build_payload(outputs_dir: Path) -> dict[str, object]:
             "items_by_query": {},
             "attrs_by_probe": {},
             "attn_by_probe": {},
+            "absolute": {},
+            "label_score_summary": [],
+            "score_points": [],
             "esci_map": {"Exact": 3, "Substitute": 2, "Complement": 1, "Irrelevant": 0},
         }
 
@@ -133,6 +228,14 @@ def _build_payload(outputs_dir: Path) -> dict[str, object]:
             )
             attn_by_probe[str(pid)] = layer_mean.to_dict(orient="records")
 
+    absolute_summary, fallback_label_summary, score_points = _compute_absolute_metrics(scored)
+    if not absolute_scorecard.empty:
+        absolute_summary = {k: (float(v) if isinstance(v, (int, float)) else v) for k, v in absolute_scorecard.iloc[0].to_dict().items()}
+    if not label_score_summary.empty:
+        label_score_rows = label_score_summary.to_dict(orient="records")
+    else:
+        label_score_rows = fallback_label_summary
+
     return {
         "overview": {
             "total_pairs": total_pairs,
@@ -145,6 +248,9 @@ def _build_payload(outputs_dir: Path) -> dict[str, object]:
         "items_by_query": items_by_query,
         "attrs_by_probe": attrs_by_probe,
         "attn_by_probe": attn_by_probe,
+        "absolute": absolute_summary,
+        "label_score_summary": label_score_rows,
+        "score_points": score_points,
         "esci_map": {"Exact": 3, "Substitute": 2, "Complement": 1, "Irrelevant": 0},
     }
 
@@ -206,11 +312,17 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
     .attn-track {{ height:10px; background:#eef2f7; border-radius:8px; overflow:hidden; }}
     .attn-fill {{ height:10px; background:linear-gradient(90deg,#0ea5e9,#14b8a6); }}
     .muted {{ color:var(--muted); }}
+    .chart-wrap {{ border:1px solid var(--line); border-radius:10px; padding:10px; background:#fcfdff; }}
+    .calib-grid {{ display:grid; grid-template-columns: 1.3fr 1fr; gap:10px; }}
+    .score-dot {{ fill:#0f766e; fill-opacity:0.55; cursor:pointer; }}
+    .score-dot:hover {{ stroke:#0f172a; stroke-width:1.2; fill-opacity:0.9; }}
+    .label-chip {{ display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; border:1px solid var(--line); margin-right:6px; }}
     @media (max-width: 980px) {{
       .grid {{ grid-template-columns: repeat(2, minmax(160px, 1fr)); }}
       .layout {{ grid-template-columns: 1fr; }}
       .two-col {{ grid-template-columns: 1fr; }}
       .meta-grid {{ grid-template-columns: repeat(2, minmax(140px,1fr)); }}
+      .calib-grid {{ grid-template-columns: 1fr; }}
     }}
   </style>
 </head>
@@ -227,6 +339,26 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
       </div>
       <div style=\"height:10px\"></div>
       <div class=\"grid\" id=\"overview-cards\"></div>
+    </div>
+
+    <div class=\"card\">
+      <h2 class=\"section-title\">Score Calibration Snapshot</h2>
+      <div class=\"explain\">
+        Secondary evaluation checks absolute separation. Target policy: Exact should score above threshold, Non-Exact should score below.
+      </div>
+      <div style=\"height:10px\"></div>
+      <div class=\"grid\" id=\"absolute-cards\"></div>
+      <div style=\"height:10px\"></div>
+      <div class=\"calib-grid\">
+        <div class=\"chart-wrap\">
+          <div class=\"muted\" style=\"margin-bottom:8px\">Model score by ground-truth label (x-axis: score 0→1)</div>
+          <svg id=\"label-score-chart\" viewBox=\"0 0 760 250\" style=\"width:100%; height:auto;\"></svg>
+        </div>
+        <div>
+          <div class=\"muted\" style=\"margin-bottom:8px\">Label score summary</div>
+          <div class=\"table-wrap\" id=\"label-summary-table\"></div>
+        </div>
+      </div>
     </div>
 
     <div class=\"card\">
@@ -299,6 +431,14 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
 
     function pct(v) {{ return `${{(100*Number(v||0)).toFixed(1)}}%`; }}
     function esc(s) {{ return String(s ?? ""); }}
+    function escAttr(s) {{
+      return String(s ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/"/g, "&quot;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/'/g, "&#39;");
+    }}
     function passPill(v) {{
       const ok = Number(v||0) >= 0.7;
       return `<span class=\"pill ${{ok ? 'ok' : 'bad'}}\">${{pct(v)}}</span>`;
@@ -315,6 +455,111 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
       document.getElementById("overview-cards").innerHTML = cards.map(([k,v]) =>
         `<div class=\"meta\"><div class=\"k\">${{k}}</div><div class=\"v\">${{v}}</div></div>`
       ).join("");
+    }}
+
+    function f4(v) {{ return Number(v || 0).toFixed(4); }}
+
+    function renderAbsolute() {{
+      const a = data.absolute || {{}};
+      const t = Number(a.exact_threshold ?? 0.9);
+      const cards = [
+        {{
+          label: `Exact Recall @${{t.toFixed(2)}}`,
+          value: pct(a.recall_exact ?? 0),
+          tip: "Of all Exact items, the share scoring at or above threshold. Higher means fewer missed Exact results."
+        }},
+        {{
+          label: `Non-Exact Specificity @${{t.toFixed(2)}}`,
+          value: pct(a.specificity_non_exact ?? 0),
+          tip: "Of all Non-Exact items, the share scoring below threshold. Higher means fewer false Exact-like scores."
+        }},
+        {{
+          label: "Exact F1",
+          value: f4(a.f1_exact ?? 0),
+          tip: "Harmonic mean of Exact precision and recall at threshold. Useful single-number balance metric."
+        }},
+        {{
+          label: "Irrelevant >= 0.90",
+          value: `${{a.irrelevant_high_score_count ?? 0}} (${{pct(a.irrelevant_high_score_rate ?? 0)}})`,
+          tip: "Count and rate of Irrelevant items with very high model scores. This is a high-risk calibration violation."
+        }},
+      ];
+      document.getElementById("absolute-cards").innerHTML = cards.map(c =>
+        `<div class=\"meta\"><div class=\"k\" title=\"${{escAttr(c.tip)}}\">${{esc(c.label)}}</div><div class=\"v\">${{c.value}}</div></div>`
+      ).join("");
+
+      const lrows = data.label_score_summary || [];
+      const tableRows = lrows.map(r => ({{
+        label: r.label_norm,
+        n: Number(r.count ?? 0),
+        mean: f4(r.mean),
+        p50: f4(r.p50),
+        p90: f4(r.p90),
+      }}));
+      document.getElementById("label-summary-table").innerHTML = renderSimpleTable(tableRows);
+
+      renderLabelScoreChart(data.score_points || []);
+    }}
+
+    function renderLabelScoreChart(points) {{
+      const svg = document.getElementById("label-score-chart");
+      const labels = ["Exact", "Substitute", "Complement", "Irrelevant"];
+      const W = 760, H = 250, L = 120, R = 20, T = 18, B = 26;
+      const innerW = W - L - R;
+      const innerH = H - T - B;
+      const rowGap = innerH / Math.max(labels.length, 1);
+
+      let out = [];
+      out.push(`<rect x="0" y="0" width="${{W}}" height="${{H}}" fill="#fcfdff"/>`);
+
+      for (let tick = 0; tick <= 10; tick++) {{
+        const x = L + (innerW * tick / 10.0);
+        out.push(`<line x1="${{x}}" y1="${{T}}" x2="${{x}}" y2="${{H-B}}" stroke="#e2e8f0" stroke-width="1"/>`);
+        out.push(`<text x="${{x}}" y="${{H-8}}" text-anchor="middle" fill="#64748b" font-size="11">${{(tick/10).toFixed(1)}}</text>`);
+      }}
+
+      labels.forEach((lbl, i) => {{
+        const y = T + rowGap * (i + 0.5);
+        out.push(`<line x1="${{L}}" y1="${{y}}" x2="${{W-R}}" y2="${{y}}" stroke="#edf2f7" stroke-width="1"/>`);
+        out.push(`<text x="${{L-10}}" y="${{y+4}}" text-anchor="end" fill="#334155" font-size="12">${{esc(lbl)}}</text>`);
+      }});
+
+      (points || []).forEach((p, idx) => {{
+        const label = String(p.label || "");
+        const li = labels.indexOf(label);
+        if (li < 0) return;
+        const score = Math.max(0, Math.min(1, Number(p.score || 0)));
+        const x = L + innerW * score;
+        const jitter = (((idx * 37) % 100) / 100.0 - 0.5) * (rowGap * 0.55);
+        const y = T + rowGap * (li + 0.5) + jitter;
+        const color = label === "Exact" ? "#0f766e" : (label === "Irrelevant" ? "#b91c1c" : "#1d4ed8");
+        const pid = escAttr(p.probe_id || "");
+        const q = escAttr(p.query || "");
+        const cat = escAttr(p.question_tag || "");
+        const tip = escAttr(`Probe: ${{p.probe_id || ""}} | Label: ${{label}} | Score: ${{score.toFixed(4)}}`);
+        out.push(`<circle class="score-dot" cx="${{x.toFixed(2)}}" cy="${{y.toFixed(2)}}" r="3.2" fill="${{color}}" fill-opacity="0.58" title="${{tip}}" data-probe="${{pid}}" data-query="${{q}}" data-cat="${{cat}}" />`);
+      }});
+
+      out.push(`<line x1="${{L}}" y1="${{H-B}}" x2="${{W-R}}" y2="${{H-B}}" stroke="#94a3b8" stroke-width="1.2"/>`);
+      out.push(`<text x="${{L + innerW/2}}" y="${{H-2}}" text-anchor="middle" fill="#64748b" font-size="12">Model output score</text>`);
+      svg.innerHTML = out.join("");
+      svg.querySelectorAll("circle.score-dot").forEach(dot => {{
+        dot.addEventListener("click", () => {{
+          const cat = dot.getAttribute("data-cat") || "";
+          const query = dot.getAttribute("data-query") || "";
+          const probe = dot.getAttribute("data-probe") || "";
+          if (cat) {{
+            selectCategory(cat);
+          }}
+          if (query) {{
+            selectQuery(query);
+          }}
+          if (probe) {{
+            selectProbe(probe);
+          }}
+          document.getElementById("detail-card")?.scrollIntoView({{ behavior: "smooth", block: "start" }});
+        }});
+      }});
     }}
 
     function renderCategories() {{
@@ -526,6 +771,7 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
     }}
 
     renderOverview();
+    renderAbsolute();
     renderCategories();
     if ((data.categories || []).length) {{
       selectCategory(data.categories[0].question_tag);

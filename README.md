@@ -18,7 +18,7 @@ Primary workflow:
 - `src/attention.py`: layer/head attention summaries
 - `src/probes.py`: ESCI load/tag/pair utilities
 - `src/curate_dataset.py`: build `probe_set_v1.csv`
-- `src/reporting.py`: directional checks + artifact export
+- `src/reporting.py`: directional checks + absolute score checks + artifact export
 - `src/generate_attributions_dataset.py`: per-probe attribution cache for dashboard drill-down
 - `src/generate_attention_dataset.py`: per-probe attention cache for dashboard drill-down
 - `src/build_dashboard.py`: static HTML dashboard generator
@@ -40,6 +40,9 @@ The notebook writes artifacts to `outputs/`:
 - `scored_pairs.csv`
 - `question_scorecard.csv`
 - `failure_triage.csv`
+- `absolute_scorecard.csv`
+- `label_score_summary.csv`
+- `absolute_violations.csv`
 - `token_attributions.csv`
 - `attention_summary.csv`
 - `brief.md`
@@ -62,10 +65,11 @@ Additional dashboard caches:
 ## Dashboard navigation
 The dashboard uses progressive disclosure:
 1. `What Was Analyzed` (aggregate metrics + assumptions)
-2. `Choose Category` (`brand_match`, `attribute_match`, `negation`, `bundle_vs_canonical`)
-3. `Choose Query` (query-level ranking performance)
-4. `Choose Query-Item Pair` (ground truth vs model score/result)
-5. `Inspect Model Behavior` (token attribution + attention summary by layer)
+2. `Score Calibration Snapshot` (Exact-vs-Non-Exact absolute checks + score-by-label chart)
+3. `Choose Category` (`brand_match`, `attribute_match`, `negation`, `bundle_vs_canonical`)
+4. `Choose Query` (query-level ranking performance)
+5. `Choose Query-Item Pair` (ground truth vs model score/result)
+6. `Inspect Model Behavior` (token attribution + attention summary by layer)
 
 Why query-level first:
 - This is a ranking task, so the natural unit for diagnosis is query-level ordering, then candidate-level drill-down.
@@ -95,6 +99,7 @@ Model output:
 
 Evaluation:
 - Primary pass/fail is directional ranking within each `pair_group_id` (not direct score regression).
+- Secondary score-separation checks evaluate `Exact` vs `Non-Exact` with thresholded metrics and guardrails for high-scoring `Irrelevant` pairs.
 
 ## ESCI label usage
 The model is used as a **single-score ranker**. ESCI labels are used for ordered checks:
