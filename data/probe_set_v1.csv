@@ -1,0 +1,41 @@
+probe_id,source,question_tag,query,item_text,esci_label,relevance_score,pair_group_id,expected_direction,target_tokens_query,target_tokens_item,notes
+h_0001,handcrafted,brand_match,nike running shoes,Nike Pegasus 40 men's running shoes,E,3,grp_h_0001,should_rank_higher,nike|running,Nike|Pegasus,exact brand match
+h_0002,handcrafted,brand_match,nike running shoes,Adidas Duramo men's running shoes,I,0,grp_h_0001,should_rank_lower,nike|running,Adidas,brand mismatch
+h_0003,handcrafted,brand_match,samsung 65 inch tv,Samsung 65 inch QLED 4K Smart TV,E,3,grp_h_0002,should_rank_higher,samsung|65 inch,Samsung|QLED,brand and category match
+h_0004,handcrafted,brand_match,samsung 65 inch tv,LG 65 inch OLED Smart TV,S,2,grp_h_0002,should_rank_lower,samsung|65 inch,LG,competitor brand
+h_0005,handcrafted,attribute_match,iphone 14 case magsafe,Case for iPhone 14 with MagSafe ring,E,3,grp_h_0003,should_rank_higher,iphone 14|magsafe,iPhone 14|MagSafe,compatibility match
+h_0006,handcrafted,attribute_match,iphone 14 case magsafe,Case for iPhone 13 with magnetic back,I,0,grp_h_0003,should_rank_lower,iphone 14|magsafe,iPhone 13,wrong compatibility
+h_0007,handcrafted,attribute_match,usb c cable 2m,USB-C charging cable 2m braided,E,3,grp_h_0004,should_rank_higher,usb c|2m,USB-C|2m,spec exact
+h_0008,handcrafted,attribute_match,usb c cable 2m,USB-C charging cable 1m braided,S,2,grp_h_0004,should_rank_lower,usb c|2m,USB-C|1m,spec near miss
+h_0009,handcrafted,attribute_match,128gb microsd card,SanDisk microSDXC 128GB UHS-I card,E,3,grp_h_0005,should_rank_higher,128gb,128GB,capacity match
+h_0010,handcrafted,attribute_match,128gb microsd card,SanDisk microSDXC 64GB UHS-I card,I,0,grp_h_0005,should_rank_lower,128gb,64GB,capacity mismatch
+h_0011,handcrafted,negation,laptop sleeve without zipper,Laptop sleeve no zipper soft neoprene,E,3,grp_h_0006,should_rank_higher,without|zipper,no zipper,negation respected
+h_0012,handcrafted,negation,laptop sleeve without zipper,Laptop sleeve with heavy duty zipper,I,0,grp_h_0006,should_rank_lower,without|zipper,with zipper,negation contradiction
+h_0013,handcrafted,negation,coffee beans not decaf,Whole bean coffee medium roast non-decaf,E,3,grp_h_0007,should_rank_higher,not|decaf,non-decaf,negation respected
+h_0014,handcrafted,negation,coffee beans not decaf,Whole bean coffee decaf medium roast,I,0,grp_h_0007,should_rank_lower,not|decaf,decaf,negation contradiction
+h_0015,handcrafted,negation,wireless mouse without bluetooth,2.4G wireless mouse USB receiver only,E,3,grp_h_0008,should_rank_higher,without|bluetooth,USB receiver only,negation respected
+h_0016,handcrafted,negation,wireless mouse without bluetooth,Wireless mouse Bluetooth + USB dual mode,I,0,grp_h_0008,should_rank_lower,without|bluetooth,Bluetooth,negation contradiction
+h_0017,handcrafted,bundle_vs_canonical,toothbrush single,Electric toothbrush handle single unit,E,3,grp_h_0009,should_rank_higher,single,single unit,single intent
+h_0018,handcrafted,bundle_vs_canonical,toothbrush single,Electric toothbrush heads 8-pack bundle,I,0,grp_h_0009,should_rank_lower,single,8-pack bundle,bundle mismatch
+h_0019,handcrafted,bundle_vs_canonical,protein bars 12 pack,Protein bar variety pack 12 count,E,3,grp_h_0010,should_rank_higher,12 pack,12 count,bundle intent
+h_0020,handcrafted,bundle_vs_canonical,protein bars 12 pack,Single protein bar chocolate flavor,I,0,grp_h_0010,should_rank_lower,12 pack,single,bundle intent mismatch
+h_0021,handcrafted,bundle_vs_canonical,aa batteries pack of 24,AA alkaline batteries 24-pack,E,3,grp_h_0011,should_rank_higher,pack of 24,24-pack,bundle match
+h_0022,handcrafted,bundle_vs_canonical,aa batteries pack of 24,AA alkaline batteries 4-pack,S,2,grp_h_0011,should_rank_lower,pack of 24,4-pack,bundle size mismatch
+h_0023,handcrafted,brand_match,lego city police car,LEGO City Police Car Building Toy,E,3,grp_h_0012,should_rank_higher,lego city,LEGO City,brand entity match
+h_0024,handcrafted,brand_match,lego city police car,Generic city police car block set,I,0,grp_h_0012,should_rank_lower,lego city,Generic,entity mismatch
+esci_0124,esci,brand_match,#15 charm,"FashionJunkie4Life Sterling Silver Number 15 Fifteen Charm Necklace, 18"" Chain, Birthday Quinceañera",Exact,3,grp_0000,should_rank_higher,,,esci_sample
+esci_0221,esci,brand_match,#15 charm,Beadthoven 100pcs 9/16''Inch 304 Stainless Steel Blank Stamping Tag Pendants for Bracelet Earring Pendant Flat Round Charms 15x1mm,Substitute,2,grp_0000,should_rank_lower,,,esci_sample
+esci_0009,esci,negation,!awnmower tires without rims,"MaxAuto 2 Pcs 16x6.50-8 Lawn Mower Tire for Garden Tractors Ridings, 4PR, Tubeless",Exact,3,grp_0001,should_rank_higher,,,esci_sample
+esci_0096,esci,negation,!awnmower tires without rims,"Honda 44710-VG3-010 Front Wheels, (Set of 2)",Substitute,2,grp_0001,should_rank_lower,,,esci_sample
+esci_0028,esci,negation,# 10 self-seal envelopes without window,"#10 Security Self-Seal Envelopes, No.10 Windowless Bussiness Envelopes, Security Tinted with Printer Friendly Design - Size 4-1/8 x 9-1/2 Inch - White - 24 LB - 500 Count",Exact,3,grp_0002,should_rank_higher,,,esci_sample
+esci_0172,esci,negation,# 10 self-seal envelopes without window,"Ohuhu 500 Pack # 8 Double Window Envelope SELF SEAL Adhesive Tinted Security Envelopes Quickbooks Check, Business Check, Documents Secure Mailing, 3 5/8"" x 8 11/16"", White Envelope",Irrelevant,0,grp_0002,should_rank_lower,,,esci_sample
+esci_0032,esci,negation,# 2 pencils not sharpened,"iScholar Gross Pack Pencils, #2, Yellow, Box of 144 (33144)",Exact,3,grp_0003,should_rank_higher,,,esci_sample
+esci_0059,esci,negation,# 2 pencils not sharpened,"Emraw Pre Sharpened Triangular Primary Size No 2 Jumbo Pencils for Preschoolers, Elementary Kids - Pack of 6 Fat Pencils with Bonus Sharpener",Irrelevant,0,grp_0003,should_rank_lower,,,esci_sample
+esci_0091,esci,negation,#1 best and not expensive bath back brush cream color,"Metene Bamboo Body Brush with Stiff and Soft Natural Bristles, Back Scrubber for Shower with Long Handle, Dual-sided Brush Head for Wet or Dry Brushing, Exfoliating Skin and Clean the Body Easily",Exact,3,grp_0004,should_rank_higher,,,esci_sample
+esci_0201,esci,negation,#1 best and not expensive bath back brush cream color,Foot Peel Mask 3 Pack， Exfoliator Peel Off Calluses Dead Skin Callus Remover，Baby Soft Smooth Touch Feet-Men Women (Lavender),Irrelevant,0,grp_0004,should_rank_lower,,,esci_sample
+esci_0021,esci,negation,#1 selling shoes for men without shoeleases,"Skechers Men's GO Walk Evolution Ultra-Impeccable Sneaker, Khaki, 12 X-Wide",Exact,3,grp_0005,should_rank_higher,,,esci_sample
+esci_0210,esci,negation,#1 selling shoes for men without shoeleases,"Skechers Men's Moreno Canvas Oxford Shoe, Taupe, 11.5 Medium US",Irrelevant,0,grp_0005,should_rank_lower,,,esci_sample
+esci_0216,esci,negation,#1 small corded treadmill without remote control,"SUNNY HEALTH & FITNESS ASUNA Space Saving Treadmill, Motorized with Speakers for AUX Audio Connection - 8730G",Exact,3,grp_0006,should_rank_higher,,,esci_sample
+esci_0085,esci,negation,#1 small corded treadmill without remote control,"Egofit Walker Pro Smallest Under Desk Electric Walking Treadmill for Home, Small & Compact Treadmill to Fit Desk Perfectly and Home & Office with APP & Remote Contro",Irrelevant,0,grp_0006,should_rank_lower,,,esci_sample
+esci_0034,esci,negation,#10 window envelopes not self seal,"Self Seal Double Window Security Envelopes (#10 - Box of 500), for Invoices, Statements and Legal Documents (4 1/8"" x 9 1/2"")",Exact,3,grp_0007,should_rank_higher,,,esci_sample
+esci_0156,esci,negation,#10 window envelopes not self seal,100 Double Window SELF Seal Security Check Envelopes - Compatible with QuickBooks and Other Checks,Irrelevant,0,grp_0007,should_rank_lower,,,esci_sample

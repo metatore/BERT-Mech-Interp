@@ -1,0 +1,25 @@
+probe_id,source,question_tag,query,item_text,esci_label,relevance_score,pair_group_id,expected_direction,target_tokens_query,target_tokens_item,notes
+h_0001,handcrafted,brand_match,nike running shoes,Nike Pegasus 40 men's running shoes,E,3,grp_h_0001,should_rank_higher,nike|running,Nike|Pegasus,exact brand match
+h_0002,handcrafted,brand_match,nike running shoes,Adidas Duramo men's running shoes,I,0,grp_h_0001,should_rank_lower,nike|running,Adidas,brand mismatch
+h_0003,handcrafted,brand_match,samsung 65 inch tv,Samsung 65 inch QLED 4K Smart TV,E,3,grp_h_0002,should_rank_higher,samsung|65 inch,Samsung|QLED,brand and category match
+h_0004,handcrafted,brand_match,samsung 65 inch tv,LG 65 inch OLED Smart TV,S,2,grp_h_0002,should_rank_lower,samsung|65 inch,LG,competitor brand
+h_0005,handcrafted,attribute_match,iphone 14 case magsafe,Case for iPhone 14 with MagSafe ring,E,3,grp_h_0003,should_rank_higher,iphone 14|magsafe,iPhone 14|MagSafe,compatibility match
+h_0006,handcrafted,attribute_match,iphone 14 case magsafe,Case for iPhone 13 with magnetic back,I,0,grp_h_0003,should_rank_lower,iphone 14|magsafe,iPhone 13,wrong compatibility
+h_0007,handcrafted,attribute_match,usb c cable 2m,USB-C charging cable 2m braided,E,3,grp_h_0004,should_rank_higher,usb c|2m,USB-C|2m,spec exact
+h_0008,handcrafted,attribute_match,usb c cable 2m,USB-C charging cable 1m braided,S,2,grp_h_0004,should_rank_lower,usb c|2m,USB-C|1m,spec near miss
+h_0009,handcrafted,attribute_match,128gb microsd card,SanDisk microSDXC 128GB UHS-I card,E,3,grp_h_0005,should_rank_higher,128gb,128GB,capacity match
+h_0010,handcrafted,attribute_match,128gb microsd card,SanDisk microSDXC 64GB UHS-I card,I,0,grp_h_0005,should_rank_lower,128gb,64GB,capacity mismatch
+h_0011,handcrafted,negation,laptop sleeve without zipper,Laptop sleeve no zipper soft neoprene,E,3,grp_h_0006,should_rank_higher,without|zipper,no zipper,negation respected
+h_0012,handcrafted,negation,laptop sleeve without zipper,Laptop sleeve with heavy duty zipper,I,0,grp_h_0006,should_rank_lower,without|zipper,with zipper,negation contradiction
+h_0013,handcrafted,negation,coffee beans not decaf,Whole bean coffee medium roast non-decaf,E,3,grp_h_0007,should_rank_higher,not|decaf,non-decaf,negation respected
+h_0014,handcrafted,negation,coffee beans not decaf,Whole bean coffee decaf medium roast,I,0,grp_h_0007,should_rank_lower,not|decaf,decaf,negation contradiction
+h_0015,handcrafted,negation,wireless mouse without bluetooth,2.4G wireless mouse USB receiver only,E,3,grp_h_0008,should_rank_higher,without|bluetooth,USB receiver only,negation respected
+h_0016,handcrafted,negation,wireless mouse without bluetooth,Wireless mouse Bluetooth + USB dual mode,I,0,grp_h_0008,should_rank_lower,without|bluetooth,Bluetooth,negation contradiction
+h_0017,handcrafted,bundle_vs_canonical,toothbrush single,Electric toothbrush handle single unit,E,3,grp_h_0009,should_rank_higher,single,single unit,single intent
+h_0018,handcrafted,bundle_vs_canonical,toothbrush single,Electric toothbrush heads 8-pack bundle,I,0,grp_h_0009,should_rank_lower,single,8-pack bundle,bundle mismatch
+h_0019,handcrafted,bundle_vs_canonical,protein bars 12 pack,Protein bar variety pack 12 count,E,3,grp_h_0010,should_rank_higher,12 pack,12 count,bundle intent
+h_0020,handcrafted,bundle_vs_canonical,protein bars 12 pack,Single protein bar chocolate flavor,I,0,grp_h_0010,should_rank_lower,12 pack,single,bundle intent mismatch
+h_0021,handcrafted,bundle_vs_canonical,aa batteries pack of 24,AA alkaline batteries 24-pack,E,3,grp_h_0011,should_rank_higher,pack of 24,24-pack,bundle match
+h_0022,handcrafted,bundle_vs_canonical,aa batteries pack of 24,AA alkaline batteries 4-pack,S,2,grp_h_0011,should_rank_lower,pack of 24,4-pack,bundle size mismatch
+h_0023,handcrafted,brand_match,lego city police car,LEGO City Police Car Building Toy,E,3,grp_h_0012,should_rank_higher,lego city,LEGO City,brand entity match
+h_0024,handcrafted,brand_match,lego city police car,Generic city police car block set,I,0,grp_h_0012,should_rank_lower,lego city,Generic,entity mismatch
