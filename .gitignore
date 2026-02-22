@@ -6,3 +6,5 @@ __pycache__/
 outputs/*.csv
 outputs/*.md
 outputs/*.html
+
+Feedback_and_Plans/

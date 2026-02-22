@@ -115,6 +115,7 @@ def _build_payload(outputs_dir: Path) -> dict[str, object]:
     scorecard = _safe_read_csv(outputs_dir / "question_scorecard.csv")
     attrs = _safe_read_csv(outputs_dir / "attributions_by_probe.csv")
     attn = _safe_read_csv(outputs_dir / "attention_by_probe.csv")
+    causal = _safe_read_csv(outputs_dir / "counterfactual_results.csv")
     absolute_scorecard = _safe_read_csv(outputs_dir / "absolute_scorecard.csv")
     label_score_summary = _safe_read_csv(outputs_dir / "label_score_summary.csv")
 
@@ -126,6 +127,9 @@ def _build_payload(outputs_dir: Path) -> dict[str, object]:
             "items_by_query": {},
             "attrs_by_probe": {},
             "attn_by_probe": {},
+            "causal_by_probe": {},
+            "failure_buckets": {"by_edit_type": [], "wrong_direction_examples": [], "edit_examples_by_type": {}},
+            "top_examples": [],
             "absolute": {},
             "label_score_summary": [],
             "score_points": [],
@@ -134,6 +138,14 @@ def _build_payload(outputs_dir: Path) -> dict[str, object]:
 
     # Normalize fields used by UI.
     scored = scored.copy()
+    probe_lookup: dict[str, dict[str, object]] = {}
+    if "probe_id" in scored.columns:
+        for _, r in scored.iterrows():
+            probe_lookup[str(r.get("probe_id", ""))] = {
+                "query": str(r.get("query", "")),
+                "question_tag": str(r.get("question_tag", "")),
+                "item_text": str(r.get("item_text", "")),
+            }
     if "rank_in_group" in scored.columns:
         scored["model_pred_direction"] = scored["rank_in_group"].apply(
             lambda x: "predicted_higher" if _safe_float(x, 9999.0) == 1.0 else "predicted_lower"
@@ -202,6 +214,8 @@ def _build_payload(outputs_dir: Path) -> dict[str, object]:
                         "rank_in_group": int(_safe_float(r.get("rank_in_group", 0.0), 0.0)) if str(r.get("rank_in_group", "")) != "" else None,
                         "group_passed": bool(r.get("group_passed", False)),
                         "question_tag": str(r.get("question_tag", "")),
+                        "tag_reason": str(r.get("tag_reason", "")),
+                        "tag_confidence": str(r.get("tag_confidence", "")),
                         "query": str(r.get("query", "")),
                     }
                 )
@@ -228,6 +242,157 @@ def _build_payload(outputs_dir: Path) -> dict[str, object]:
             )
             attn_by_probe[str(pid)] = layer_mean.to_dict(orient="records")
 
+    # Causal payload keyed by probe_id.
+    causal_by_probe: dict[str, list[dict[str, object]]] = {}
+    failure_by_edit_type: list[dict[str, object]] = []
+    wrong_direction_examples: list[dict[str, object]] = []
+    edit_examples_by_type: dict[str, list[dict[str, object]]] = {}
+    top_examples: list[dict[str, object]] = []
+    if not causal.empty and "probe_id" in causal.columns:
+        keep = [
+            c
+            for c in [
+                "edit_type",
+                "expected_delta_direction",
+                "original_margin",
+                "edited_margin",
+                "delta_margin",
+                "original_prob",
+                "edited_prob",
+                "delta_prob",
+                "sign_consistent",
+                "original_text",
+                "edited_text",
+            ]
+            if c in causal.columns
+        ]
+        if "delta_margin" in causal.columns:
+            causal["abs_delta_margin"] = causal["delta_margin"].map(lambda x: abs(_safe_float(x)))
+        else:
+            causal["abs_delta_margin"] = 0.0
+        for pid, part in causal.groupby("probe_id"):
+            part = part.sort_values("abs_delta_margin", ascending=False)
+            causal_by_probe[str(pid)] = part[keep + ["abs_delta_margin"]].to_dict(orient="records")
+
+        # Drilldown examples grouped by edit type.
+        if "edit_type" in causal.columns:
+            for edit_type, part in causal.groupby("edit_type"):
+                part = part.sort_values("abs_delta_margin", ascending=False).head(80)
+                ex_rows: list[dict[str, object]] = []
+                for _, r in part.iterrows():
+                    pid = str(r.get("probe_id", ""))
+                    meta = probe_lookup.get(pid, {})
+                    ex_rows.append(
+                        {
+                            "probe_id": pid,
+                            "query": str(r.get("query", "")) or str(meta.get("query", "")),
+                            "item_text": str(r.get("item_text", "")) or str(meta.get("item_text", "")),
+                            "original_text": str(r.get("original_text", "")),
+                            "edited_text": str(r.get("edited_text", "")),
+                            "question_tag": str(meta.get("question_tag", "")),
+                            "expected_delta_direction": str(r.get("expected_delta_direction", "")),
+                            "original_prob": _safe_float(r.get("original_prob", 0.0)),
+                            "edited_prob": _safe_float(r.get("edited_prob", 0.0)),
+                            "delta_prob": _safe_float(r.get("delta_prob", 0.0)),
+                            "delta_margin": _safe_float(r.get("delta_margin", 0.0)),
+                            "sign_consistent": bool(r.get("sign_consistent", False)),
+                        }
+                    )
+                edit_examples_by_type[str(edit_type)] = ex_rows
+
+        if {"edit_type", "sign_consistent"}.issubset(causal.columns):
+            by_edit = (
+                causal.groupby("edit_type")["sign_consistent"]
+                .agg(num_tests="count", sign_consistency="mean")
+                .reset_index()
+                .sort_values(["sign_consistency", "num_tests"], ascending=[True, False])
+            )
+            for _, r in by_edit.iterrows():
+                failure_by_edit_type.append(
+                    {
+                        "edit_type": str(r["edit_type"]),
+                        "num_tests": int(r["num_tests"]),
+                        "sign_consistency": float(r["sign_consistency"]),
+                        "failure_rate": float(1.0 - float(r["sign_consistency"])),
+                    }
+                )
+
+        if {"sign_consistent", "delta_margin", "probe_id", "query", "edit_type"}.issubset(causal.columns):
+            wrong = causal[causal["sign_consistent"] == False].copy()  # noqa: E712
+            if len(wrong):
+                wrong["abs_delta_margin"] = wrong["delta_margin"].map(lambda x: abs(_safe_float(x)))
+                wrong = wrong.sort_values("abs_delta_margin", ascending=False).head(15)
+                wrong_direction_examples = [
+                    {
+                        "probe_id": str(r.get("probe_id", "")),
+                        "query": str(r.get("query", "")),
+                        "edit_type": str(r.get("edit_type", "")),
+                        "expected_delta_direction": str(r.get("expected_delta_direction", "")),
+                        "delta_margin": _safe_float(r.get("delta_margin", 0.0)),
+                        "sign_consistent": bool(r.get("sign_consistent", False)),
+                    }
+                    for _, r in wrong.iterrows()
+                ]
+
+        # Curated examples for non-technical quick entry.
+        if "delta_margin" in causal.columns:
+            causal["abs_delta_margin"] = causal["delta_margin"].map(lambda x: abs(_safe_float(x)))
+            if "sign_consistent" in causal.columns:
+                stable = causal[causal["sign_consistent"] == True].copy()  # noqa: E712
+                wrong = causal[causal["sign_consistent"] == False].copy()  # noqa: E712
+            else:
+                stable = pd.DataFrame(columns=causal.columns)
+                wrong = pd.DataFrame(columns=causal.columns)
+
+            if len(wrong):
+                r = wrong.sort_values("abs_delta_margin", ascending=False).iloc[0]
+                pid = str(r.get("probe_id", ""))
+                meta = probe_lookup.get(pid, {})
+                top_examples.append(
+                    {
+                        "kind": "most_concerning_failure",
+                        "title": "Most Concerning Failure",
+                        "probe_id": pid,
+                        "query": str(r.get("query", "")) or str(meta.get("query", "")),
+                        "question_tag": str(meta.get("question_tag", "")),
+                        "edit_type": str(r.get("edit_type", "")),
+                        "delta_margin": _safe_float(r.get("delta_margin", 0.0)),
+                        "summary": "Model moved in the wrong direction with a large change.",
+                    }
+                )
+            if len(stable):
+                r = stable.sort_values("abs_delta_margin", ascending=False).iloc[0]
+                pid = str(r.get("probe_id", ""))
+                meta = probe_lookup.get(pid, {})
+                top_examples.append(
+                    {
+                        "kind": "strongest_stable_behavior",
+                        "title": "Strongest Stable Behavior",
+                        "probe_id": pid,
+                        "query": str(r.get("query", "")) or str(meta.get("query", "")),
+                        "question_tag": str(meta.get("question_tag", "")),
+                        "edit_type": str(r.get("edit_type", "")),
+                        "delta_margin": _safe_float(r.get("delta_margin", 0.0)),
+                        "summary": "Model changed strongly and in the expected direction.",
+                    }
+                )
+            if len(wrong):
+                r = wrong.sort_values("abs_delta_margin", ascending=True).iloc[0]
+                pid = str(r.get("probe_id", ""))
+                meta = probe_lookup.get(pid, {})
+                top_examples.append(
+                    {
+                        "kind": "most_ambiguous_case",
+                        "title": "Most Ambiguous Case",
+                        "probe_id": pid,
+                        "query": str(r.get("query", "")) or str(meta.get("query", "")),
+                        "question_tag": str(meta.get("question_tag", "")),
+                        "edit_type": str(r.get("edit_type", "")),
+                        "delta_margin": _safe_float(r.get("delta_margin", 0.0)),
+                        "summary": "Model still moved the wrong way, but by a smaller amount.",
+                    }
+                )
+
     absolute_summary, fallback_label_summary, score_points = _compute_absolute_metrics(scored)
     if not absolute_scorecard.empty:
         absolute_summary = {k: (float(v) if isinstance(v, (int, float)) else v) for k, v in absolute_scorecard.iloc[0].to_dict().items()}
@@ -248,6 +413,13 @@ def _build_payload(outputs_dir: Path) -> dict[str, object]:
         "items_by_query": items_by_query,
         "attrs_by_probe": attrs_by_probe,
         "attn_by_probe": attn_by_probe,
+        "causal_by_probe": causal_by_probe,
+        "failure_buckets": {
+            "by_edit_type": failure_by_edit_type,
+            "wrong_direction_examples": wrong_direction_examples,
+            "edit_examples_by_type": edit_examples_by_type,
+        },
+        "top_examples": top_examples,
         "absolute": absolute_summary,
         "label_score_summary": label_score_rows,
         "score_points": score_points,
@@ -317,12 +489,35 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
     .score-dot {{ fill:#0f766e; fill-opacity:0.55; cursor:pointer; }}
     .score-dot:hover {{ stroke:#0f172a; stroke-width:1.2; fill-opacity:0.9; }}
     .label-chip {{ display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; border:1px solid var(--line); margin-right:6px; }}
+    .badge {{ display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600; letter-spacing:0.02em; border:1px solid var(--line); margin-left:6px; }}
+    .badge.obs {{ color:#0c4a6e; background:#e0f2fe; border-color:#bae6fd; }}
+    .badge.causal {{ color:#365314; background:#ecfccb; border-color:#d9f99d; }}
+    .controls {{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:6px 0 10px 0; }}
+    .controls label {{ font-size:12px; color:var(--muted); }}
+    .controls select {{ border:1px solid var(--line); border-radius:8px; padding:4px 8px; background:#fff; }}
+    tr.warnrow td {{ background:#fff1f2; }}
+    .small-note {{ font-size:12px; color:var(--muted); }}
+    .mode-toggle {{ display:flex; align-items:center; gap:8px; margin: 0 0 12px 0; }}
+    .mode-toggle input {{ transform: scale(1.05); }}
+    .examples-strip {{ display:grid; grid-template-columns: repeat(3, minmax(220px, 1fr)); gap:10px; }}
+    .example-card {{ border:1px solid var(--line); border-radius:10px; background:#fcfdff; padding:10px; cursor:pointer; }}
+    .example-card:hover {{ background:#f8fbff; }}
+    .example-title {{ font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em; }}
+    .example-query {{ font-weight:600; margin:4px 0; }}
+    .example-summary {{ font-size:13px; color:#334155; }}
+    .score-compare {{ display:grid; gap:4px; min-width:180px; }}
+    .score-row {{ display:grid; grid-template-columns: 52px 1fr 56px; gap:8px; align-items:center; font-size:12px; }}
+    .score-track {{ height:8px; border-radius:999px; background:#e2e8f0; overflow:hidden; }}
+    .score-fill-before {{ height:8px; background:#94a3b8; }}
+    .score-fill-after {{ height:8px; background:#0f766e; }}
+    .story-card {{ border:1px solid var(--line); border-radius:10px; background:#f8fafc; padding:10px; margin-bottom:10px; }}
     @media (max-width: 980px) {{
       .grid {{ grid-template-columns: repeat(2, minmax(160px, 1fr)); }}
       .layout {{ grid-template-columns: 1fr; }}
       .two-col {{ grid-template-columns: 1fr; }}
       .meta-grid {{ grid-template-columns: repeat(2, minmax(140px,1fr)); }}
       .calib-grid {{ grid-template-columns: 1fr; }}
+      .examples-strip {{ grid-template-columns: 1fr; }}
     }}
   </style>
 </head>
@@ -330,6 +525,19 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
   <div class=\"wrap\">
     <h1 class=\"title\">E-commerce Relevance Mech-Interp Dashboard</h1>
     <p class=\"subtitle\">Progressive drill-down: Overview → Category → Query → Query-item diagnostics</p>
+    <div class=\"mode-toggle\">
+      <input id=\"mode-toggle\" type=\"checkbox\" checked />
+      <label for=\"mode-toggle\"><strong>Beginner Mode</strong> (plain language + visual explanations)</label>
+    </div>
+
+    <div class=\"card\">
+      <h2 class=\"section-title\">Start Here: Top 3 Examples</h2>
+      <div class=\"explain\">
+        Click one of these examples to jump straight to an important case.
+      </div>
+      <div style=\"height:10px\"></div>
+      <div class=\"examples-strip\" id=\"top-examples\"></div>
+    </div>
 
     <div class=\"card\">
       <h2 class=\"section-title\">What Was Analyzed</h2>
@@ -362,6 +570,29 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
     </div>
 
     <div class=\"card\">
+      <h2 class=\"section-title\">Failure Buckets Summary <span class=\"badge causal\">Causal</span></h2>
+      <div class=\"explain\">
+        This section summarizes counterfactual stress tests by edit type and highlights biggest wrong-direction deltas.
+      </div>
+      <div style=\"height:10px\"></div>
+      <div class=\"two-col\">
+        <div>
+          <div class=\"muted\" style=\"margin-bottom:8px\">Sign-consistency by edit type</div>
+          <div class=\"table-wrap\" id=\"failure-by-edit\"></div>
+        </div>
+        <div>
+          <div class=\"muted\" style=\"margin-bottom:8px\">Top wrong-direction examples</div>
+          <div class=\"table-wrap\" id=\"failure-wrong\"></div>
+        </div>
+      </div>
+      <div style=\"height:10px\"></div>
+      <div>
+        <div class=\"muted\" id=\"failure-drilldown-label\">Edit type drilldown: click a row above to see individual examples</div>
+        <div class=\"table-wrap\" id=\"failure-edit-drilldown\"></div>
+      </div>
+    </div>
+
+    <div class=\"card\">
       <h2 class=\"section-title\">Step 1: Choose Category</h2>
       <div class=\"table-wrap\"><table id=\"categories-table\"></table></div>
     </div>
@@ -384,19 +615,21 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
 
     <div class=\"card\" id=\"detail-card\">
       <h2 class=\"section-title\">Step 4: Inspect Model Behavior</h2>
-      <div class=\"explain\">Green tokens pushed relevance up. Red tokens pushed down. Darker color means stronger influence. Attention by layer is supporting evidence, not a full explanation.</div>
+      <div class=\"explain\">Green tokens pushed relevance up. Red tokens pushed down. Darker color means stronger influence. Attention is supporting evidence; causal edits are stronger behavior checks.</div>
       <div class=\"meta-grid\">
         <div class=\"meta\"><div class=\"k\">Ground Truth Label</div><div class=\"v\" id=\"meta-label\">-</div></div>
         <div class=\"meta\"><div class=\"k\">Ground Truth Score</div><div class=\"v\" id=\"meta-rel\">-</div></div>
         <div class=\"meta\"><div class=\"k\">Model Output Score</div><div class=\"v\" id=\"meta-model\">-</div></div>
         <div class=\"meta\"><div class=\"k\">Expected Direction</div><div class=\"v\" id=\"meta-exp\">-</div></div>
       </div>
+      <div class=\"small-note\" id=\"tag-provenance\"></div>
       <div id=\"pair-query\" class=\"pair-text\"></div>
       <div id=\"pair-item\" class=\"pair-text\"></div>
+      <div id=\"what-this-means\" class=\"story-card\"></div>
 
       <div class=\"two-col\">
         <div class=\"card\">
-          <h3 style=\"margin-top:0\">Query Token Attribution</h3>
+          <h3 style=\"margin-top:0\">Query Token Attribution <span class=\"badge obs\">Observational</span></h3>
           <div id=\"query-cloud\"></div>
           <div class=\"two-col\" style=\"margin-top:8px\">
             <div><strong>Helpful query tokens</strong><div id=\"q-pos\" class=\"table-wrap\"></div></div>
@@ -404,7 +637,7 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
           </div>
         </div>
         <div class=\"card\">
-          <h3 style=\"margin-top:0\">Item Token Attribution</h3>
+          <h3 style=\"margin-top:0\">Item Token Attribution <span class=\"badge obs\">Observational</span></h3>
           <div id=\"item-cloud\"></div>
           <div class=\"two-col\" style=\"margin-top:8px\">
             <div><strong>Helpful item tokens</strong><div id=\"i-pos\" class=\"table-wrap\"></div></div>
@@ -414,7 +647,19 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
       </div>
 
       <div class=\"card\">
-        <h3 style=\"margin-top:0\">Attention Summary by Layer</h3>
+        <h3 style=\"margin-top:0\">Causal Tests <span class=\"badge causal\">Causal</span></h3>
+        <div class=\"explain\">
+          Counterfactual edits perturb one property at a time. Wrong-direction deltas indicate behavior that conflicts with expected relevance changes.
+        </div>
+        <div class=\"controls\">
+          <label for=\"causal-edit-filter\">Edit type</label>
+          <select id=\"causal-edit-filter\"></select>
+        </div>
+        <div class=\"table-wrap\" id=\"causal-table\"></div>
+      </div>
+
+      <div class=\"card\">
+        <h3 style=\"margin-top:0\">Attention Summary by Layer <span class=\"badge obs\">Observational</span></h3>
         <div class=\"explain\">
           First-principles read: this tells you where the model is focusing its computation.
           If attention on query terms is weak when it should be high, or cross-segment attention is low, that points to retrieval-matching issues.
@@ -562,6 +807,201 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
       }});
     }}
 
+    function renderFailureBuckets() {{
+      const fb = data.failure_buckets || {{}};
+      const byEdit = (fb.by_edit_type || []).map(r => ({{
+        edit_type: String(r.edit_type || ""),
+        num_tests: Number(r.num_tests || 0),
+        sign_consistency: Number(r.sign_consistency || 0),
+        failure_rate: Number(r.failure_rate || 0),
+      }}));
+      const wrong = (fb.wrong_direction_examples || []).map(r => ({{
+        probe_id: r.probe_id,
+        edit_type: r.edit_type,
+        expected_delta_direction: r.expected_delta_direction,
+        delta_margin: Number(r.delta_margin || 0).toFixed(4),
+        query: r.query,
+      }}));
+      document.getElementById("failure-wrong").innerHTML = renderSimpleTable(wrong);
+
+      const byEditHost = document.getElementById("failure-by-edit");
+      if (!byEdit.length) {{
+        byEditHost.innerHTML = "<p class='muted' style='padding:8px'>No causal summary available.</p>";
+        document.getElementById("failure-edit-drilldown").innerHTML = "<p class='muted' style='padding:8px'>No edit-type examples available.</p>";
+        return;
+      }}
+
+      const head = `<thead><tr><th>Edit Type</th><th>Tests</th><th>Sign Consistency</th><th>Failure Rate</th></tr></thead>`;
+      const body = byEdit.map(r => `
+        <tr class="clickable" data-edit-type="${{escAttr(r.edit_type)}}">
+          <td>${{esc(r.edit_type)}}</td>
+          <td>${{r.num_tests}}</td>
+          <td>${{pct(r.sign_consistency)}}</td>
+          <td>${{pct(r.failure_rate)}}</td>
+        </tr>
+      `).join("");
+      byEditHost.innerHTML = `<table>${{head}}<tbody>${{body}}</tbody></table>`;
+      byEditHost.querySelectorAll("tr[data-edit-type]").forEach(tr => {{
+        tr.addEventListener("click", () => {{
+          selectedFailureEditType = tr.getAttribute("data-edit-type") || "";
+          renderFailureEditDrilldown(selectedFailureEditType);
+        }});
+      }});
+
+      selectedFailureEditType = byEdit[0].edit_type;
+      renderFailureEditDrilldown(selectedFailureEditType);
+    }}
+
+    function renderFailureEditDrilldown(editType) {{
+      const fb = data.failure_buckets || {{}};
+      const host = document.getElementById("failure-edit-drilldown");
+      const label = document.getElementById("failure-drilldown-label");
+      const rows = fb.edit_examples_by_type?.[editType] || [];
+      label.textContent = editType
+        ? `Edit type drilldown: ${{editType}}`
+        : "Edit type drilldown: click a row above to see individual examples";
+      if (!rows.length) {{
+        host.innerHTML = "<p class='muted' style='padding:8px'>No examples for this edit type.</p>";
+        return;
+      }}
+      const head = `
+        <thead>
+          <tr>
+            <th>Query</th>
+            <th>Item</th>
+            <th>Text Change</th>
+            <th>Before</th>
+            <th>After</th>
+            <th>Delta</th>
+            <th>Result</th>
+          </tr>
+        </thead>
+      `;
+      const body = rows.map((r, idx) => {{
+        const ok = Boolean(r.sign_consistent);
+        return `
+          <tr class="clickable ${{ok ? '' : 'warnrow'}}" data-drill-idx="${{idx}}" data-edit-type="${{escAttr(editType)}}">
+            <td>${{esc(r.query || "")}}</td>
+            <td>${{esc(r.item_text || "")}}</td>
+            <td>${{renderTextChange(r.original_text, r.edited_text)}}</td>
+            <td>${{Number(r.original_prob || 0).toFixed(3)}}</td>
+            <td>${{Number(r.edited_prob || 0).toFixed(3)}}</td>
+            <td>${{Number(r.delta_margin || 0).toFixed(3)}}</td>
+            <td><span class="pill ${{ok ? 'ok' : 'bad'}}">${{ok ? 'as expected' : 'wrong-direction'}}</span></td>
+          </tr>
+        `;
+      }}).join("");
+      host.innerHTML = `<table>${{head}}<tbody>${{body}}</tbody></table>`;
+      host.querySelectorAll("tr[data-drill-idx]").forEach(tr => {{
+        tr.addEventListener("click", () => {{
+          const i = Number(tr.getAttribute("data-drill-idx") || 0);
+          const chosen = rows[i] || {{}};
+          jumpToProbe(chosen);
+        }});
+      }});
+    }}
+
+    function findCategoryByQuery(query) {{
+      const cats = data.categories || [];
+      for (const c of cats) {{
+        const qs = data.queries?.[c.question_tag] || [];
+        if (qs.some(x => String(x.query) === String(query))) return c.question_tag;
+      }}
+      return "";
+    }}
+
+    function jumpToProbe(example) {{
+      const cat = example.question_tag || findCategoryByQuery(example.query || "");
+      if (cat) selectCategory(cat);
+      if (example.query) selectQuery(example.query);
+      if (example.probe_id) selectProbe(example.probe_id);
+      document.getElementById("detail-card")?.scrollIntoView({{ behavior: "smooth", block: "start" }});
+    }}
+
+    function renderTopExamples() {{
+      const host = document.getElementById("top-examples");
+      const rows = data.top_examples || [];
+      if (!rows.length) {{
+        host.innerHTML = "<p class='muted'>No curated examples yet. Generate counterfactual results to populate this area.</p>";
+        return;
+      }}
+      host.innerHTML = rows.map((r, idx) => `
+        <div class="example-card" data-ex-idx="${{idx}}">
+          <div class="example-title">${{esc(r.title || "Example")}}</div>
+          <div class="example-query">${{esc(r.query || "")}}</div>
+          <div class="example-summary">${{esc(r.summary || "")}}</div>
+          <div class="small-note">Edit: ${{esc(r.edit_type || "-")}} | Delta: ${{Number(r.delta_margin || 0).toFixed(3)}}</div>
+        </div>
+      `).join("");
+      host.querySelectorAll(".example-card").forEach(card => {{
+        card.addEventListener("click", () => {{
+          const idx = Number(card.getAttribute("data-ex-idx") || 0);
+          jumpToProbe(rows[idx] || {{}});
+        }});
+      }});
+    }}
+
+    function scoreCompareCell(beforeProb, afterProb) {{
+      const b = Math.max(0, Math.min(1, Number(beforeProb || 0)));
+      const a = Math.max(0, Math.min(1, Number(afterProb || 0)));
+      return `
+        <div class="score-compare">
+          <div class="score-row">
+            <div>Before</div>
+            <div class="score-track"><div class="score-fill-before" style="width:${{(b*100).toFixed(1)}}%"></div></div>
+            <div>${{b.toFixed(3)}}</div>
+          </div>
+          <div class="score-row">
+            <div>After</div>
+            <div class="score-track"><div class="score-fill-after" style="width:${{(a*100).toFixed(1)}}%"></div></div>
+            <div>${{a.toFixed(3)}}</div>
+          </div>
+        </div>
+      `;
+    }}
+
+    function renderTextChange(originalText, editedText) {{
+      const o = String(originalText || "");
+      const e = String(editedText || "");
+      if (!o && !e) return "<span class='muted'>n/a</span>";
+      if (!o || !e || o === e) return `<div class="small-note">${{esc(e || o)}}</div>`;
+
+      const ot = o.split(/\\s+/).filter(Boolean);
+      const et = e.split(/\\s+/).filter(Boolean);
+      const oSet = new Set(ot.map(t => t.toLowerCase()));
+      const eSet = new Set(et.map(t => t.toLowerCase()));
+      const markStyle = "background:#fde68a; border-radius:4px; padding:0 2px;";
+      const om = ot.map(t => eSet.has(t.toLowerCase()) ? esc(t) : `<span style="${{markStyle}}">${{esc(t)}}</span>`).join(" ");
+      const em = et.map(t => oSet.has(t.toLowerCase()) ? esc(t) : `<span style="${{markStyle}}">${{esc(t)}}</span>`).join(" ");
+      return `
+        <div class="small-note"><strong>Original:</strong> ${{om}}</div>
+        <div class="small-note"><strong>Edited:</strong> ${{em}}</div>
+      `;
+    }}
+
+    function renderWhatThisMeans(probeId) {{
+      const host = document.getElementById("what-this-means");
+      const rows = data.causal_by_probe?.[probeId] || [];
+      if (!rows.length) {{
+        host.innerHTML = "<strong>What this means:</strong> No causal test rows for this example yet.";
+        return;
+      }}
+      const wrong = rows.filter(r => !Boolean(r.sign_consistent));
+      const best = rows.slice().sort((a,b) => Number(b.abs_delta_margin || 0) - Number(a.abs_delta_margin || 0))[0];
+      if (wrong.length) {{
+        const worst = wrong.slice().sort((a,b) => Number(b.abs_delta_margin || 0) - Number(a.abs_delta_margin || 0))[0];
+        host.innerHTML = `
+          <strong>What this means:</strong> This example has a concern. After a <strong>${{esc(worst.edit_type)}}</strong> change, the model moved in the wrong direction.<br>
+          <span class="muted">Expected: ${{esc(worst.expected_delta_direction)}} | Actual change: ${{Number(worst.delta_margin || 0).toFixed(3)}} margin.</span>
+        `;
+      }} else {{
+        host.innerHTML = `
+          <strong>What this means:</strong> This example looks stable. The strongest edit (<strong>${{esc(best.edit_type)}}</strong>) moved the model in the expected direction.<br>
+          <span class="muted">Largest change: ${{Number(best.delta_margin || 0).toFixed(3)}} margin.</span>
+        `;
+      }}
+    }}
+
     function renderCategories() {{
       const rows = data.categories || [];
       const head = `<thead><tr><th>Category</th><th>Queries</th><th>Pairs</th><th>Groups</th><th>Pass Rate</th></tr></thead>`;
@@ -620,6 +1060,83 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
     let selectedCategory = null;
     let selectedQuery = null;
     let selectedProbe = null;
+    let selectedCausalFilter = "all";
+    let selectedFailureEditType = "";
+    let beginnerMode = true;
+
+    function renderCausalTests(probeId) {{
+      const filter = document.getElementById("causal-edit-filter");
+      const table = document.getElementById("causal-table");
+      const rows = data.causal_by_probe?.[probeId] || [];
+      const editTypes = Array.from(new Set(rows.map(r => String(r.edit_type || "")).filter(Boolean))).sort();
+      const opts = ["all", ...editTypes];
+      filter.innerHTML = opts.map(o => `<option value="${{escAttr(o)}}">${{esc(o)}}</option>`).join("");
+      filter.value = opts.includes(selectedCausalFilter) ? selectedCausalFilter : "all";
+
+      const shown = rows
+        .filter(r => filter.value === "all" ? true : String(r.edit_type || "") === filter.value)
+        .slice()
+        .sort((a,b) => Number(b.abs_delta_margin || 0) - Number(a.abs_delta_margin || 0));
+
+      if (!shown.length) {{
+        table.innerHTML = "<p class='muted' style='padding:8px'>No causal rows available for this probe.</p>";
+        return;
+      }}
+
+      const head = beginnerMode
+        ? `
+          <thead>
+            <tr>
+              <th>Edit Type</th>
+              <th>Expected Reaction</th>
+              <th>Before vs After Score</th>
+              <th>Model Reaction</th>
+              <th>Result</th>
+            </tr>
+          </thead>
+        `
+        : `
+          <thead>
+            <tr>
+              <th>Edit Type</th>
+              <th>Expected</th>
+              <th>Original Margin</th>
+              <th>Edited Margin</th>
+              <th>Delta Margin</th>
+              <th>Delta Prob</th>
+              <th>Result</th>
+            </tr>
+          </thead>
+        `;
+      const body = shown.map(r => {{
+        const ok = Boolean(r.sign_consistent);
+        if (beginnerMode) {{
+          const dm = Number(r.delta_margin || 0);
+          const reaction = dm > 0 ? "Score went up" : (dm < 0 ? "Score went down" : "No change");
+          return `
+            <tr class="${{ok ? '' : 'warnrow'}}">
+              <td>${{esc(r.edit_type)}}</td>
+              <td>${{esc(r.expected_delta_direction)}}</td>
+              <td>${{scoreCompareCell(r.original_prob, r.edited_prob)}}</td>
+              <td>${{reaction}} (${{dm.toFixed(3)}})</td>
+              <td><span class="pill ${{ok ? 'ok' : 'bad'}}">${{ok ? 'as expected' : 'wrong-direction'}}</span></td>
+            </tr>
+          `;
+        }}
+        return `
+          <tr class="${{ok ? '' : 'warnrow'}}">
+            <td>${{esc(r.edit_type)}}</td>
+            <td>${{esc(r.expected_delta_direction)}}</td>
+            <td>${{Number(r.original_margin || 0).toFixed(4)}}</td>
+            <td>${{Number(r.edited_margin || 0).toFixed(4)}}</td>
+            <td>${{Number(r.delta_margin || 0).toFixed(4)}}</td>
+            <td>${{Number(r.delta_prob || 0).toFixed(4)}}</td>
+            <td><span class="pill ${{ok ? 'ok' : 'bad'}}">${{ok ? 'pass' : 'wrong-direction'}}</span></td>
+          </tr>
+        `;
+      }}).join("");
+      table.innerHTML = `<table>${{head}}<tbody>${{body}}</tbody></table>`;
+    }}
 
     function selectCategory(cat) {{
       selectedCategory = cat;
@@ -661,14 +1178,18 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
 
     function clearDetail() {{
       ["meta-label","meta-rel","meta-model","meta-exp"].forEach(id => document.getElementById(id).textContent = "-");
+      document.getElementById("tag-provenance").textContent = "";
       document.getElementById("pair-query").innerHTML = "";
       document.getElementById("pair-item").innerHTML = "";
+      document.getElementById("what-this-means").innerHTML = "";
       document.getElementById("query-cloud").innerHTML = "";
       document.getElementById("item-cloud").innerHTML = "";
       document.getElementById("q-pos").innerHTML = "";
       document.getElementById("q-neg").innerHTML = "";
       document.getElementById("i-pos").innerHTML = "";
       document.getElementById("i-neg").innerHTML = "";
+      document.getElementById("causal-edit-filter").innerHTML = "";
+      document.getElementById("causal-table").innerHTML = "";
       document.getElementById("attn-table").innerHTML = "";
       document.getElementById("attn-insights").innerHTML = "";
       document.getElementById("attn-bars").innerHTML = "";
@@ -748,6 +1269,10 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
       document.getElementById("meta-rel").textContent = item.relevance_score != null ? String(item.relevance_score) : "-";
       document.getElementById("meta-model").textContent = item.model_score != null ? Number(item.model_score).toFixed(4) : "-";
       document.getElementById("meta-exp").textContent = esc(item.expected_direction || "-");
+      document.getElementById("tag-provenance").textContent =
+        (item.tag_reason || item.tag_confidence)
+          ? `Tag provenance: tag=${{item.question_tag || "-"}}, reason=${{item.tag_reason || "-"}}, confidence=${{item.tag_confidence || "-"}}`
+          : "";
       document.getElementById("pair-query").innerHTML = `<b>Query:</b> ${{esc(item.query || selectedQuery || "")}}`;
       document.getElementById("pair-item").innerHTML = `<b>Item:</b> ${{esc(item.item_text || "")}}`;
 
@@ -768,11 +1293,24 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
         cls_to_item_mean: Number(r.cls_to_item_mean).toFixed(4),
         query_to_item_mean: Number(r.query_to_item_mean).toFixed(4),
       }})));
+
+      renderCausalTests(probeId);
+      renderWhatThisMeans(probeId);
     }}
 
     renderOverview();
+    renderTopExamples();
     renderAbsolute();
+    renderFailureBuckets();
     renderCategories();
+    document.getElementById("mode-toggle").addEventListener("change", (e) => {{
+      beginnerMode = Boolean(e.target.checked);
+      if (selectedProbe) renderCausalTests(selectedProbe);
+    }});
+    document.getElementById("causal-edit-filter").addEventListener("change", (e) => {{
+      selectedCausalFilter = e.target.value || "all";
+      if (selectedProbe) renderCausalTests(selectedProbe);
+    }});
     if ((data.categories || []).length) {{
       selectCategory(data.categories[0].question_tag);
     }}

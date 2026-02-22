@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Literal
 
 import pandas as pd
 
@@ -14,6 +15,8 @@ def generate_attributions_for_scored_pairs(
     out_csv: Path,
     model_name: str = "cross-encoder/ms-marco-MiniLM-L12-v2",
     max_rows: int | None = None,
+    method: Literal["grad_x_embed_saliency", "integrated_gradients"] = "grad_x_embed_saliency",
+    ig_steps: int = 20,
 ) -> Path:
     scored = pd.read_csv(scored_csv)
     if max_rows is not None:
@@ -31,7 +34,7 @@ def generate_attributions_for_scored_pairs(
         probe_id = str(row["probe_id"])
         query = str(row["query"])
         item_text = str(row["item_text"])
-        attr = token_gradient_attribution(bundle, query, item_text)
+        attr = token_gradient_attribution(bundle, query, item_text, method=method, ig_steps=ig_steps)
         attr["probe_id"] = probe_id
         attr["query"] = query
         attr["item_text"] = item_text
@@ -49,6 +52,13 @@ def main() -> None:
     parser.add_argument("--out-csv", type=Path, default=Path("outputs/attributions_by_probe.csv"))
     parser.add_argument("--model-name", type=str, default="cross-encoder/ms-marco-MiniLM-L12-v2")
     parser.add_argument("--max-rows", type=int, default=None)
+    parser.add_argument(
+        "--method",
+        type=str,
+        default="grad_x_embed_saliency",
+        choices=["grad_x_embed_saliency", "integrated_gradients"],
+    )
+    parser.add_argument("--ig-steps", type=int, default=20)
     args = parser.parse_args()
 
     out = generate_attributions_for_scored_pairs(
@@ -56,6 +66,8 @@ def main() -> None:
         out_csv=args.out_csv,
         model_name=args.model_name,
         max_rows=args.max_rows,
+        method=args.method,
+        ig_steps=args.ig_steps,
     )
     print(f"Wrote attribution dataset to {out}")
 

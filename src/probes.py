@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 
@@ -19,21 +19,28 @@ class ProbeConfig:
     max_rows: int = 50
 
 
+@dataclass
+class TagDecision:
+    question_tag: str
+    tag_reason: Literal["manual", "regex", "fallback"]
+    tag_confidence: Literal["high", "heuristic", "low"]
+
+
 def _contains_any(text: str, terms: set[str]) -> bool:
     t = text.lower()
     return any(term in t for term in terms)
 
 
-def tag_question(query: str, item_text: str) -> str:
+def tag_question(query: str, item_text: str) -> TagDecision:
     q = str(query).lower()
     i = str(item_text).lower()
     if _contains_any(q, NEGATION_TERMS):
-        return "negation"
+        return TagDecision(question_tag="negation", tag_reason="regex", tag_confidence="heuristic")
     if _contains_any(q + " " + i, BUNDLE_TERMS):
-        return "bundle_vs_canonical"
+        return TagDecision(question_tag="bundle_vs_canonical", tag_reason="regex", tag_confidence="heuristic")
     if SPEC_PATTERN.search(q) or SPEC_PATTERN.search(i):
-        return "attribute_match"
-    return "brand_match"
+        return TagDecision(question_tag="attribute_match", tag_reason="regex", tag_confidence="heuristic")
+    return TagDecision(question_tag="unclassified", tag_reason="fallback", tag_confidence="low")
 
 
 def map_esci_to_score(label: str) -> int:
@@ -96,7 +103,10 @@ def load_esci_from_hf(config: ProbeConfig) -> pd.DataFrame:
         raise ValueError("No ESCI rows matched current filters (locale/slice).")
 
     out = pd.DataFrame(rows).dropna()
-    out["question_tag"] = [tag_question(q, t) for q, t in zip(out["query"], out["item_text"])]
+    tags = [tag_question(q, t) for q, t in zip(out["query"], out["item_text"])]
+    out["question_tag"] = [t.question_tag for t in tags]
+    out["tag_reason"] = [t.tag_reason for t in tags]
+    out["tag_confidence"] = [t.tag_confidence for t in tags]
     out = out.sample(min(config.max_rows, len(out)), random_state=7).reset_index(drop=True)
     out["source"] = "esci"
     out["probe_id"] = [f"esci_{i:04d}" for i in range(len(out))]

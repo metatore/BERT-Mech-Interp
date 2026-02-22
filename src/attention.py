@@ -21,22 +21,22 @@ def attention_summary(
     item_text: str,
     max_length: int = 256,
 ) -> pd.DataFrame:
-    tok = bundle.tokenizer(
+    tok = bundle.adapter.tokenizer(
         query,
         item_text,
         return_tensors="pt",
         truncation=True,
         max_length=max_length,
     )
-    input_ids = tok["input_ids"].to(bundle.device)
+    input_ids = tok["input_ids"].to(bundle.adapter.device)
     token_type_ids = tok.get("token_type_ids")
     if token_type_ids is None:
         token_type_ids = torch.zeros_like(input_ids)
-    token_type_ids = token_type_ids.to(bundle.device)
-    attention_mask = tok["attention_mask"].to(bundle.device)
+    token_type_ids = token_type_ids.to(bundle.adapter.device)
+    attention_mask = tok["attention_mask"].to(bundle.adapter.device)
 
     with torch.no_grad():
-        out = bundle.model(
+        out = bundle.adapter.model(
             input_ids=input_ids,
             token_type_ids=token_type_ids,
             attention_mask=attention_mask,

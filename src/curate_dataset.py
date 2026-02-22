@@ -26,6 +26,10 @@ def load_handcrafted(path: str | Path) -> pd.DataFrame:
     missing = needed - set(df.columns)
     if missing:
         raise ValueError(f"Handcrafted CSV missing: {sorted(missing)}")
+    if "tag_reason" not in df.columns:
+        df["tag_reason"] = "manual"
+    if "tag_confidence" not in df.columns:
+        df["tag_confidence"] = "high"
     return df
 
 
