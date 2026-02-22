@@ -12,7 +12,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from attribution import token_gradient_attribution
-from causal import generate_counterfactual_results
+from causal import CausalLabel, generate_counterfactual_results
 from inference import BaseCrossEncoderAdapter, HFCrossEncoderAdapter, ModelBundle, score_pairs
 from probes import tag_question
 
@@ -190,6 +190,15 @@ class Phase2ATests(unittest.TestCase):
         self.assertEqual(ig_df["attribution_method"].iloc[0], "integrated_gradients")
 
     def test_counterfactual_generation_and_schema(self):
+        class DummyLabeler:
+            def label(self, **kwargs):
+                return CausalLabel(
+                    expected_delta_direction="down",
+                    expected_reason="test",
+                    expected_confidence="high",
+                    label_source="test_judge",
+                )
+
         bundle = ModelBundle(
             adapter=HFCrossEncoderAdapter(
                 tokenizer=DummyTokenizer(),
@@ -208,12 +217,28 @@ class Phase2ATests(unittest.TestCase):
                 }
             ]
         )
-        out = generate_counterfactual_results(scored, bundle)
+        out = generate_counterfactual_results(scored, bundle, labeler=DummyLabeler())
         self.assertGreater(len(out), 0)
         self.assertTrue((out["artifact_kind"] == "causal").all())
         self.assertTrue(out["edited_text"].map(lambda x: isinstance(x, str) and len(x) > 0).all())
         self.assertTrue(out["expected_delta_direction"].isin({"up", "down", "neutral"}).all())
         self.assertTrue(out["sign_consistent"].map(lambda x: isinstance(x, (bool, np.bool_))).all())
+        self.assertTrue((out["label_source"] == "test_judge").all())
+
+    def test_counterfactual_labels_disabled_without_labeler(self):
+        bundle = ModelBundle(
+            adapter=HFCrossEncoderAdapter(
+                tokenizer=DummyTokenizer(),
+                model=DummyModel(out_dim=2).eval(),
+                device=torch.device("cpu"),
+                name="dummy-2class",
+            )
+        )
+        scored = pd.DataFrame([{"probe_id": "p1", "pair_group_id": "g1", "query": "nike shoes", "item_text": "nike shoes"}])
+        out = generate_counterfactual_results(scored, bundle, labeler=None)
+        self.assertGreater(len(out), 0)
+        self.assertTrue(out["expected_delta_direction"].isna().all())
+        self.assertTrue(out["sign_consistent"].isna().all())
 
     def test_tagging_allows_unclassified(self):
         decision = tag_question("random search phrase", "generic product listing")

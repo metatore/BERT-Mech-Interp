@@ -228,6 +228,9 @@ def summarize_causal_results(causal_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.
     tmp = causal_df.copy()
     if "sign_consistent" not in tmp.columns:
         raise ValueError("Expected sign_consistent column in causal results.")
+    tmp = tmp[tmp["sign_consistent"].notna()].copy()
+    if tmp.empty:
+        return pd.DataFrame(columns=["edit_type", "num_tests", "sign_consistency"]), pd.DataFrame()
     summary = (
         tmp.groupby("edit_type")["sign_consistent"]
         .agg(num_tests="count", sign_consistency="mean")

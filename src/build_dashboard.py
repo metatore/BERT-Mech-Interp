@@ -20,6 +20,19 @@ def _safe_float(x: object, default: float = 0.0) -> float:
         return default
 
 
+def _safe_nullable_bool(x: object) -> bool | None:
+    if pd.isna(x):
+        return None
+    if isinstance(x, bool):
+        return x
+    s = str(x).strip().lower()
+    if s in {"true", "1"}:
+        return True
+    if s in {"false", "0"}:
+        return False
+    return None
+
+
 def _normalize_esci_label(label: object) -> str:
     mapping = {
         "e": "Exact",
@@ -33,6 +46,53 @@ def _normalize_esci_label(label: object) -> str:
     }
     key = str(label).strip().lower()
     return mapping.get(key, str(label).strip())
+
+
+def _build_seed_overview(project_root: Path) -> dict[str, object]:
+    seed_path = project_root / "data" / "handcrafted_seed.csv"
+    seed = _safe_read_csv(seed_path)
+    if seed.empty:
+        return {"available": False, "rows": 0, "pair_groups": 0, "by_tag": [], "example_pairs": []}
+
+    out: dict[str, object] = {
+        "available": True,
+        "rows": int(len(seed)),
+        "pair_groups": int(seed["pair_group_id"].nunique()) if "pair_group_id" in seed.columns else 0,
+        "by_tag": [],
+        "example_pairs": [],
+    }
+    if "question_tag" in seed.columns:
+        by_tag = []
+        for tag, part in seed.groupby("question_tag", sort=False):
+            by_tag.append({"question_tag": str(tag), "rows": int(len(part)), "queries": int(part["query"].nunique())})
+        out["by_tag"] = sorted(by_tag, key=lambda r: (-int(r["rows"]), str(r["question_tag"])))
+
+    # Show a few representative handcrafted pairs by tag for quick visual inspection.
+    if {"pair_group_id", "query", "item_text"}.issubset(seed.columns):
+        examples: list[dict[str, object]] = []
+        for tag, part in seed.groupby("question_tag", sort=False):
+            shown = 0
+            for gid, g in part.groupby("pair_group_id", sort=False):
+                if shown >= 2:
+                    break
+                g = g.sort_values("relevance_score", ascending=False) if "relevance_score" in g.columns else g
+                hi = g.iloc[0]
+                lo = g.iloc[-1] if len(g) > 1 else g.iloc[0]
+                examples.append(
+                    {
+                        "question_tag": str(tag),
+                        "pair_group_id": str(gid),
+                        "query": str(hi.get("query", "")),
+                        "high_item_text": str(hi.get("item_text", "")),
+                        "high_label": str(hi.get("esci_label", "")),
+                        "low_item_text": str(lo.get("item_text", "")),
+                        "low_label": str(lo.get("esci_label", "")),
+                        "notes": str(hi.get("notes", "") or lo.get("notes", "")),
+                    }
+                )
+                shown += 1
+        out["example_pairs"] = examples[:12]
+    return out
 
 
 def _compute_absolute_metrics(scored: pd.DataFrame) -> tuple[dict[str, object], list[dict[str, object]], list[dict[str, object]]]:
@@ -111,6 +171,8 @@ def _compute_absolute_metrics(scored: pd.DataFrame) -> tuple[dict[str, object], 
 
 
 def _build_payload(outputs_dir: Path) -> dict[str, object]:
+    project_root = outputs_dir.parent
+    seed_overview = _build_seed_overview(project_root)
     scored = _safe_read_csv(outputs_dir / "scored_pairs.csv")
     scorecard = _safe_read_csv(outputs_dir / "question_scorecard.csv")
     attrs = _safe_read_csv(outputs_dir / "attributions_by_probe.csv")
@@ -129,7 +191,9 @@ def _build_payload(outputs_dir: Path) -> dict[str, object]:
             "attn_by_probe": {},
             "causal_by_probe": {},
             "failure_buckets": {"by_edit_type": [], "wrong_direction_examples": [], "edit_examples_by_type": {}},
+            "causal_labeling_status": "no_causal_data",
             "top_examples": [],
+            "seed_overview": seed_overview,
             "absolute": {},
             "label_score_summary": [],
             "score_points": [],
@@ -247,8 +311,10 @@ def _build_payload(outputs_dir: Path) -> dict[str, object]:
     failure_by_edit_type: list[dict[str, object]] = []
     wrong_direction_examples: list[dict[str, object]] = []
     edit_examples_by_type: dict[str, list[dict[str, object]]] = {}
+    causal_labeling_status = "no_causal_data"
     top_examples: list[dict[str, object]] = []
     if not causal.empty and "probe_id" in causal.columns:
+        causal_labeling_status = "present_unlabeled"
         keep = [
             c
             for c in [
@@ -261,6 +327,9 @@ def _build_payload(outputs_dir: Path) -> dict[str, object]:
                 "edited_prob",
                 "delta_prob",
                 "sign_consistent",
+                "expected_reason",
+                "expected_confidence",
+                "label_source",
                 "original_text",
                 "edited_text",
             ]
@@ -273,6 +342,15 @@ def _build_payload(outputs_dir: Path) -> dict[str, object]:
         for pid, part in causal.groupby("probe_id"):
             part = part.sort_values("abs_delta_margin", ascending=False)
             causal_by_probe[str(pid)] = part[keep + ["abs_delta_margin"]].to_dict(orient="records")
+
+        if "label_source" in causal.columns:
+            sources = {str(x) for x in causal["label_source"].dropna().tolist() if str(x)}
+            if any(s == "openai_judge" for s in sources):
+                causal_labeling_status = "enabled_openai"
+            elif any(s == "disabled_no_api_key" for s in sources):
+                causal_labeling_status = "disabled_no_api_key"
+            elif sources:
+                causal_labeling_status = "other_label_source"
 
         # Drilldown examples grouped by edit type.
         if "edit_type" in causal.columns:
@@ -290,19 +368,23 @@ def _build_payload(outputs_dir: Path) -> dict[str, object]:
                             "original_text": str(r.get("original_text", "")),
                             "edited_text": str(r.get("edited_text", "")),
                             "question_tag": str(meta.get("question_tag", "")),
-                            "expected_delta_direction": str(r.get("expected_delta_direction", "")),
+                            "expected_delta_direction": "" if pd.isna(r.get("expected_delta_direction")) else str(r.get("expected_delta_direction", "")),
+                            "expected_reason": "" if pd.isna(r.get("expected_reason")) else str(r.get("expected_reason", "")),
+                            "expected_confidence": "" if pd.isna(r.get("expected_confidence")) else str(r.get("expected_confidence", "")),
+                            "label_source": "" if pd.isna(r.get("label_source")) else str(r.get("label_source", "")),
                             "original_prob": _safe_float(r.get("original_prob", 0.0)),
                             "edited_prob": _safe_float(r.get("edited_prob", 0.0)),
                             "delta_prob": _safe_float(r.get("delta_prob", 0.0)),
                             "delta_margin": _safe_float(r.get("delta_margin", 0.0)),
-                            "sign_consistent": bool(r.get("sign_consistent", False)),
+                            "sign_consistent": _safe_nullable_bool(r.get("sign_consistent")),
                         }
                     )
                 edit_examples_by_type[str(edit_type)] = ex_rows
 
-        if {"edit_type", "sign_consistent"}.issubset(causal.columns):
+        labeled_causal = causal[causal["sign_consistent"].notna()].copy() if "sign_consistent" in causal.columns else pd.DataFrame()
+        if {"edit_type", "sign_consistent"}.issubset(labeled_causal.columns) and len(labeled_causal):
             by_edit = (
-                causal.groupby("edit_type")["sign_consistent"]
+                labeled_causal.groupby("edit_type")["sign_consistent"]
                 .agg(num_tests="count", sign_consistency="mean")
                 .reset_index()
                 .sort_values(["sign_consistency", "num_tests"], ascending=[True, False])
@@ -327,9 +409,9 @@ def _build_payload(outputs_dir: Path) -> dict[str, object]:
                         "probe_id": str(r.get("probe_id", "")),
                         "query": str(r.get("query", "")),
                         "edit_type": str(r.get("edit_type", "")),
-                        "expected_delta_direction": str(r.get("expected_delta_direction", "")),
+                        "expected_delta_direction": "" if pd.isna(r.get("expected_delta_direction")) else str(r.get("expected_delta_direction", "")),
                         "delta_margin": _safe_float(r.get("delta_margin", 0.0)),
-                        "sign_consistent": bool(r.get("sign_consistent", False)),
+                        "sign_consistent": _safe_nullable_bool(r.get("sign_consistent")),
                     }
                     for _, r in wrong.iterrows()
                 ]
@@ -419,7 +501,9 @@ def _build_payload(outputs_dir: Path) -> dict[str, object]:
             "wrong_direction_examples": wrong_direction_examples,
             "edit_examples_by_type": edit_examples_by_type,
         },
+        "causal_labeling_status": causal_labeling_status,
         "top_examples": top_examples,
+        "seed_overview": seed_overview,
         "absolute": absolute_summary,
         "label_score_summary": label_score_rows,
         "score_points": score_points,
@@ -505,12 +589,20 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
     .example-title {{ font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em; }}
     .example-query {{ font-weight:600; margin:4px 0; }}
     .example-summary {{ font-size:13px; color:#334155; }}
+    .seed-grid {{ display:grid; grid-template-columns: 1fr 1.5fr; gap:10px; }}
+    .seed-pair-card {{ border:1px solid var(--line); border-radius:10px; padding:10px; background:#fcfdff; }}
+    .seed-pair-card .seed-tag {{ font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:0.05em; }}
+    .seed-pair-card .seed-query {{ font-weight:600; margin:4px 0 8px 0; }}
+    .seed-row {{ font-size:13px; margin:3px 0; }}
+    .seed-row strong {{ font-size:12px; }}
     .score-compare {{ display:grid; gap:4px; min-width:180px; }}
     .score-row {{ display:grid; grid-template-columns: 52px 1fr 56px; gap:8px; align-items:center; font-size:12px; }}
     .score-track {{ height:8px; border-radius:999px; background:#e2e8f0; overflow:hidden; }}
     .score-fill-before {{ height:8px; background:#94a3b8; }}
     .score-fill-after {{ height:8px; background:#0f766e; }}
     .story-card {{ border:1px solid var(--line); border-radius:10px; background:#f8fafc; padding:10px; margin-bottom:10px; }}
+    .banner {{ border:1px solid #fcd34d; background:#fffbeb; color:#78350f; border-radius:10px; padding:10px 12px; margin: 0 0 12px 0; }}
+    .banner code {{ background:#fff7d6; padding:1px 4px; border-radius:4px; }}
     @media (max-width: 980px) {{
       .grid {{ grid-template-columns: repeat(2, minmax(160px, 1fr)); }}
       .layout {{ grid-template-columns: 1fr; }}
@@ -518,6 +610,7 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
       .meta-grid {{ grid-template-columns: repeat(2, minmax(140px,1fr)); }}
       .calib-grid {{ grid-template-columns: 1fr; }}
       .examples-strip {{ grid-template-columns: 1fr; }}
+      .seed-grid {{ grid-template-columns: 1fr; }}
     }}
   </style>
 </head>
@@ -529,6 +622,7 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
       <input id=\"mode-toggle\" type=\"checkbox\" checked />
       <label for=\"mode-toggle\"><strong>Beginner Mode</strong> (plain language + visual explanations)</label>
     </div>
+    <div id=\"causal-labeling-banner\"></div>
 
     <div class=\"card\">
       <h2 class=\"section-title\">Start Here: Top 3 Examples</h2>
@@ -537,6 +631,26 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
       </div>
       <div style=\"height:10px\"></div>
       <div class=\"examples-strip\" id=\"top-examples\"></div>
+    </div>
+
+    <div class=\"card\">
+      <h2 class=\"section-title\">Handcrafted Seed Set Overview</h2>
+      <div class=\"explain\">
+        These are the manually designed examples used as the core sanity-check set. They are intentionally small and balanced across failure modes.
+      </div>
+      <div style=\"height:10px\"></div>
+      <div class=\"seed-grid\">
+        <div>
+          <div class=\"grid\" id=\"seed-overview-cards\"></div>
+          <div style=\"height:10px\"></div>
+          <div class=\"muted\" style=\"margin-bottom:8px\">Seed rows by category</div>
+          <div class=\"table-wrap\" id=\"seed-tag-table\"></div>
+        </div>
+        <div>
+          <div class=\"muted\" style=\"margin-bottom:8px\">Example handcrafted pairs</div>
+          <div id=\"seed-example-pairs\"></div>
+        </div>
+      </div>
     </div>
 
     <div class=\"card\">
@@ -702,6 +816,70 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
       ).join("");
     }}
 
+    function renderSeedOverview() {{
+      const s = data.seed_overview || {{}};
+      const cardsHost = document.getElementById("seed-overview-cards");
+      const tagHost = document.getElementById("seed-tag-table");
+      const exHost = document.getElementById("seed-example-pairs");
+      if (!s.available) {{
+        cardsHost.innerHTML = "";
+        tagHost.innerHTML = "<p class='muted' style='padding:8px'>No handcrafted seed file found.</p>";
+        exHost.innerHTML = "";
+        return;
+      }}
+      const cards = [
+        ["Seed Rows", Number(s.rows || 0)],
+        ["Pair Groups", Number(s.pair_groups || 0)],
+        ["Categories", Number((s.by_tag || []).length)],
+        ["Example Pairs Shown", Number((s.example_pairs || []).length)],
+      ];
+      cardsHost.innerHTML = cards.map(([k,v]) =>
+        `<div class=\"meta\"><div class=\"k\">${{esc(k)}}</div><div class=\"v\">${{v}}</div></div>`
+      ).join("");
+
+      const tagRows = (s.by_tag || []).map(r => ({{
+        category: r.question_tag,
+        rows: Number(r.rows || 0),
+        queries: Number(r.queries || 0),
+      }}));
+      tagHost.innerHTML = renderSimpleTable(tagRows);
+
+      const exs = s.example_pairs || [];
+      if (!exs.length) {{
+        exHost.innerHTML = "<p class='muted'>No example handcrafted pairs available.</p>";
+        return;
+      }}
+      exHost.innerHTML = exs.map(r => `
+        <div class="seed-pair-card">
+          <div class="seed-tag">${{esc(r.question_tag || "")}} · ${{esc(r.pair_group_id || "")}}</div>
+          <div class="seed-query">${{esc(r.query || "")}}</div>
+          <div class="seed-row"><strong>Higher relevance example:</strong> [${{esc(r.high_label || "-")}}] ${{esc(r.high_item_text || "")}}</div>
+          <div class="seed-row"><strong>Lower relevance example:</strong> [${{esc(r.low_label || "-")}}] ${{esc(r.low_item_text || "")}}</div>
+          ${{r.notes ? `<div class=\"small-note\" style=\"margin-top:6px\">${{esc(r.notes)}}</div>` : ""}}
+        </div>
+      `).join("");
+    }}
+
+    function renderCausalLabelingBanner() {{
+      const host = document.getElementById("causal-labeling-banner");
+      const status = String(data.causal_labeling_status || "");
+      if (status === "enabled_openai") {{
+        host.innerHTML = `<div class="banner" style="border-color:#86efac;background:#f0fdf4;color:#14532d;">
+          Causal expected-direction labels are enabled via OpenAI judge. Failure buckets and wrong-direction badges are based on model-judged expectations.
+        </div>`;
+        return;
+      }}
+      if (status === "disabled_no_api_key" || status === "present_unlabeled" || status === "other_label_source") {{
+        host.innerHTML = `<div class="banner">
+          Causal labels are disabled or unavailable. Score changes are still shown, but <strong>expected vs wrong-direction</strong> judgments may be unjudged.<br>
+          To enable labels, regenerate counterfactuals with a key:
+          <code>python src/generate_counterfactual_dataset.py --prompt-openai-api-key --openai-model gpt-5-mini</code>
+        </div>`;
+        return;
+      }}
+      host.innerHTML = "";
+    }}
+
     function f4(v) {{ return Number(v || 0).toFixed(4); }}
 
     function renderAbsolute() {{
@@ -826,7 +1004,7 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
 
       const byEditHost = document.getElementById("failure-by-edit");
       if (!byEdit.length) {{
-        byEditHost.innerHTML = "<p class='muted' style='padding:8px'>No causal summary available.</p>";
+        byEditHost.innerHTML = "<p class='muted' style='padding:8px'>No causal label summary available. Provide an OpenAI API key when generating counterfactuals to enable expected-direction labels.</p>";
         document.getElementById("failure-edit-drilldown").innerHTML = "<p class='muted' style='padding:8px'>No edit-type examples available.</p>";
         return;
       }}
@@ -870,6 +1048,7 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
             <th>Query</th>
             <th>Item</th>
             <th>Text Change</th>
+            <th>Expected</th>
             <th>Before</th>
             <th>After</th>
             <th>Delta</th>
@@ -878,16 +1057,17 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
         </thead>
       `;
       const body = rows.map((r, idx) => {{
-        const ok = Boolean(r.sign_consistent);
+        const verdict = causalVerdict(r.sign_consistent);
         return `
-          <tr class="clickable ${{ok ? '' : 'warnrow'}}" data-drill-idx="${{idx}}" data-edit-type="${{escAttr(editType)}}">
+          <tr class="clickable ${{verdict.state === 'fail' ? 'warnrow' : ''}}" data-drill-idx="${{idx}}" data-edit-type="${{escAttr(editType)}}">
             <td>${{esc(r.query || "")}}</td>
             <td>${{esc(r.item_text || "")}}</td>
             <td>${{renderTextChange(r.original_text, r.edited_text)}}</td>
+            <td>${{esc(r.expected_delta_direction || "unknown")}}</td>
             <td>${{Number(r.original_prob || 0).toFixed(3)}}</td>
             <td>${{Number(r.edited_prob || 0).toFixed(3)}}</td>
             <td>${{Number(r.delta_margin || 0).toFixed(3)}}</td>
-            <td><span class="pill ${{ok ? 'ok' : 'bad'}}">${{ok ? 'as expected' : 'wrong-direction'}}</span></td>
+            <td><span class="pill ${{verdict.pillClass}}">${{verdict.label}}</span></td>
           </tr>
         `;
       }}).join("");
@@ -960,6 +1140,12 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
       `;
     }}
 
+    function causalVerdict(signConsistent) {{
+      if (signConsistent === true) return {{ state: "pass", label: "as expected", pillClass: "ok" }};
+      if (signConsistent === false) return {{ state: "fail", label: "wrong-direction", pillClass: "bad" }};
+      return {{ state: "unknown", label: "unjudged", pillClass: "" }};
+    }}
+
     function renderTextChange(originalText, editedText) {{
       const o = String(originalText || "");
       const e = String(editedText || "");
@@ -986,8 +1172,13 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
         host.innerHTML = "<strong>What this means:</strong> No causal test rows for this example yet.";
         return;
       }}
-      const wrong = rows.filter(r => !Boolean(r.sign_consistent));
-      const best = rows.slice().sort((a,b) => Number(b.abs_delta_margin || 0) - Number(a.abs_delta_margin || 0))[0];
+      const labeled = rows.filter(r => r.sign_consistent === true || r.sign_consistent === false);
+      if (!labeled.length) {{
+        host.innerHTML = "<strong>What this means:</strong> Score changes are shown, but expected-direction labels are disabled. Regenerate counterfactuals with an OpenAI API key to mark edits as expected vs wrong-direction.";
+        return;
+      }}
+      const wrong = labeled.filter(r => r.sign_consistent === false);
+      const best = labeled.slice().sort((a,b) => Number(b.abs_delta_margin || 0) - Number(a.abs_delta_margin || 0))[0];
       if (wrong.length) {{
         const worst = wrong.slice().sort((a,b) => Number(b.abs_delta_margin || 0) - Number(a.abs_delta_margin || 0))[0];
         host.innerHTML = `
@@ -1109,29 +1300,29 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
           </thead>
         `;
       const body = shown.map(r => {{
-        const ok = Boolean(r.sign_consistent);
+        const verdict = causalVerdict(r.sign_consistent);
         if (beginnerMode) {{
           const dm = Number(r.delta_margin || 0);
           const reaction = dm > 0 ? "Score went up" : (dm < 0 ? "Score went down" : "No change");
           return `
-            <tr class="${{ok ? '' : 'warnrow'}}">
+            <tr class="${{verdict.state === 'fail' ? 'warnrow' : ''}}">
               <td>${{esc(r.edit_type)}}</td>
-              <td>${{esc(r.expected_delta_direction)}}</td>
+              <td>${{esc(r.expected_delta_direction || 'unjudged')}}</td>
               <td>${{scoreCompareCell(r.original_prob, r.edited_prob)}}</td>
               <td>${{reaction}} (${{dm.toFixed(3)}})</td>
-              <td><span class="pill ${{ok ? 'ok' : 'bad'}}">${{ok ? 'as expected' : 'wrong-direction'}}</span></td>
+              <td><span class="pill ${{verdict.pillClass}}">${{verdict.label}}</span></td>
             </tr>
           `;
         }}
         return `
-          <tr class="${{ok ? '' : 'warnrow'}}">
+          <tr class="${{verdict.state === 'fail' ? 'warnrow' : ''}}">
             <td>${{esc(r.edit_type)}}</td>
-            <td>${{esc(r.expected_delta_direction)}}</td>
+            <td>${{esc(r.expected_delta_direction || 'unjudged')}}</td>
             <td>${{Number(r.original_margin || 0).toFixed(4)}}</td>
             <td>${{Number(r.edited_margin || 0).toFixed(4)}}</td>
             <td>${{Number(r.delta_margin || 0).toFixed(4)}}</td>
             <td>${{Number(r.delta_prob || 0).toFixed(4)}}</td>
-            <td><span class="pill ${{ok ? 'ok' : 'bad'}}">${{ok ? 'pass' : 'wrong-direction'}}</span></td>
+            <td><span class="pill ${{verdict.pillClass}}">${{verdict.label}}</span></td>
           </tr>
         `;
       }}).join("");
@@ -1299,6 +1490,8 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
     }}
 
     renderOverview();
+    renderSeedOverview();
+    renderCausalLabelingBanner();
     renderTopExamples();
     renderAbsolute();
     renderFailureBuckets();

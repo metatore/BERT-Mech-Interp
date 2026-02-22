@@ -1,0 +1,7 @@
+query,item_text,expected_question_tag,notes
+nike running shoes,Adidas men's running shoes,brand_match,brand mismatch should dominate
+usb c cable 2m,USB-C charging cable 1m braided,attribute_match,length/spec mismatch
+coffee beans not decaf,Whole bean coffee decaf medium roast,negation,negation in query should dominate
+aa batteries pack of 24,AA alkaline batteries 4-pack,bundle_vs_canonical,count/pack mismatch
+iphone magsafe case,Phone case magnetic ring accessory,other_lexical,lexical relation but not clearly brand/spec/bundle/negation
+wireless mouse,Mechanical keyboard,unclassified,broad mismatch and no target diagnostic bucket

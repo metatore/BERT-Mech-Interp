@@ -19,7 +19,6 @@ Default model:
 
 ## Quickstart
 ```bash
-cd /Users/salvatoretornatore/Dev-Sandbox/BERT-Mech-Interp
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -27,6 +26,11 @@ pip install -r requirements.txt
 python src/curate_dataset.py
 python src/generate_attributions_dataset.py
 python src/generate_attention_dataset.py
+# Optional: enable OpenAI-based expected-direction labels
+# (if OPENAI_API_KEY is already exported, no extra flags are needed)
+# python src/generate_counterfactual_dataset.py
+# Optional: use OpenAI to generate cleaner counterfactual edits too
+# python src/generate_counterfactual_dataset.py --edit-generator openai
 python src/generate_counterfactual_dataset.py
 python src/build_dashboard.py
 ```
@@ -46,6 +50,10 @@ Open:
 Overview:
 
 ![Dashboard overview](docs/images/dashboard_overview.png)
+
+Handcrafted seed set overview (balanced sanity-check examples):
+
+![Dashboard seed overview](docs/images/dashboard_seed_overview.png)
 
 Category/query/pair drilldown:
 
@@ -80,8 +88,67 @@ Each row stores:
 - original vs edited text,
 - before/after model outputs,
 - delta,
-- expected direction,
-- pass/fail sign consistency.
+- optional expected direction (OpenAI-labeled when API key is provided),
+- optional pass/fail sign consistency.
+
+By default, causal labels are **disabled** (to avoid misleading heuristics). You can enable them at generation time using:
+```bash
+python src/generate_counterfactual_dataset.py
+```
+If `OPENAI_API_KEY` is set in your shell, labels are enabled automatically. You can also use `--prompt-openai-api-key` for hidden input.
+
+### Optional: OpenAI counterfactual edit generation (cleaner edits)
+Heuristic edits are fast but can create awkward strings in edge cases (for example negation flips). To use OpenAI-generated edits:
+
+```bash
+python src/generate_counterfactual_dataset.py --edit-generator openai
+```
+
+OpenAI caches used by the causal pipeline:
+- `outputs/openai_edit_cache.jsonl` (counterfactual edit generation)
+- `outputs/openai_causal_label_cache.jsonl` (expected-direction labels)
+
+Reruns are much faster once these caches are warm.
+
+## Optional: OpenAI-Based Probe Tagging (for better category consistency)
+By default, probe tags are heuristic. You can use an OpenAI classifier-style tagger (closed label set + cached results) during curation:
+
+```bash
+python src/curate_dataset.py --target-size 120 --tagger openai --prompt-openai-api-key --openai-model gpt-5-mini
+```
+
+Tagger outputs are cached to:
+- `outputs/openai_tag_cache.jsonl`
+
+### Heuristic lexicons (externalized)
+The cheap heuristic tagger now loads vocab files from `data/heuristics/` when present:
+- `brands.txt`
+- `colors.txt`
+- `spec_units.txt`
+- `bundle_terms.txt`
+- `negation_terms.txt`
+- `stopwords.txt`
+
+You can bootstrap a stronger `brands.txt` from Amazon Reviews'23 metadata:
+
+```bash
+python src/build_brand_lexicon_from_amazon_reviews23.py
+```
+
+This writes:
+- `data/heuristics/brands.txt`
+- `outputs/brand_lexicon_candidates.csv`
+
+### Golden-set consistency check (recommended)
+Use the provided template to create a small fixed evaluation set and track agreement over time:
+
+```bash
+python src/evaluate_tagger_golden.py \
+  --golden-csv data/tagging_golden_set_template.csv \
+  --prompt-openai-api-key \
+  --openai-model gpt-5-mini \
+  --out-csv outputs/tagger_golden_eval.csv
+```
 
 ## Output Artifacts
 Main files in `outputs/`:
@@ -108,10 +175,14 @@ Main files in `outputs/`:
 
 ## Tests
 ```bash
-cd /Users/salvatoretornatore/Dev-Sandbox/BERT-Mech-Interp
 source .venv/bin/activate
 python -m unittest discover -s tests -p 'test_*.py'
 ```
+
+## Troubleshooting (Practical)
+- **Curation looks stuck on ESCI streaming**: the Hugging Face stream can take a while before the first rows arrive; progress logs now print during warmup and collection.
+- **Causal generation feels slow**: OpenAI labeling is network-bound and can be slow on the first run. Check `[CAUSAL]` progress logs and let caches warm (`openai_causal_label_cache.jsonl` / `openai_edit_cache.jsonl`).
+- **Python syntax errors using `python`**: make sure you are using the venv (`source .venv/bin/activate`) so `python` is Python 3, not system Python 2.
 
 ## Scope Note
 This repo is a **toy but practical prototype** for relevance debugging. Counterfactual edits are currently heuristic text edits (not a full production metadata parser).

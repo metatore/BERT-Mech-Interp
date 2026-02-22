@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import getpass
+import os
 from pathlib import Path
 
 import pandas as pd
 
-from causal import generate_counterfactual_results
+from causal import OpenAICausalLabeler, OpenAICounterfactualEditor, generate_counterfactual_results
 from inference import load_cross_encoder
 
 
@@ -14,13 +16,23 @@ def generate_counterfactual_for_scored_pairs(
     out_csv: Path,
     model_name: str = "cross-encoder/ms-marco-MiniLM-L12-v2",
     max_rows: int | None = None,
+    openai_api_key: str | None = None,
+    openai_model: str = "gpt-5-mini",
+    edit_generator: str = "heuristic",
+    openai_edit_cache: Path = Path("outputs/openai_edit_cache.jsonl"),
 ) -> Path:
     scored = pd.read_csv(scored_csv)
     if max_rows is not None:
         scored = scored.head(max_rows).copy()
 
     bundle = load_cross_encoder(model_name=model_name)
-    causal_df = generate_counterfactual_results(scored, bundle)
+    labeler = OpenAICausalLabeler(api_key=openai_api_key, model=openai_model) if openai_api_key else None
+    editor = None
+    if edit_generator == "openai":
+        if not openai_api_key:
+            raise RuntimeError("OpenAI edit generator requires API key (set OPENAI_API_KEY or use --prompt-openai-api-key).")
+        editor = OpenAICounterfactualEditor(api_key=openai_api_key, model=openai_model, cache_path=openai_edit_cache)
+    causal_df = generate_counterfactual_results(scored, bundle, labeler=labeler, editor=editor)
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     causal_df.to_csv(out_csv, index=False)
     return out_csv
@@ -32,13 +44,40 @@ def main() -> None:
     parser.add_argument("--out-csv", type=Path, default=Path("outputs/counterfactual_results.csv"))
     parser.add_argument("--model-name", type=str, default="cross-encoder/ms-marco-MiniLM-L12-v2")
     parser.add_argument("--max-rows", type=int, default=None)
+    parser.add_argument("--openai-model", type=str, default="gpt-5-mini")
+    parser.add_argument("--edit-generator", type=str, default="heuristic", choices=["heuristic", "openai"])
+    parser.add_argument("--openai-api-key-env", type=str, default="OPENAI_API_KEY")
+    parser.add_argument("--openai-edit-cache", type=Path, default=Path("outputs/openai_edit_cache.jsonl"))
+    parser.add_argument(
+        "--prompt-openai-api-key",
+        action="store_true",
+        help="Prompt securely (hidden input) for an OpenAI API key to enable causal expected-direction labeling.",
+    )
     args = parser.parse_args()
+
+    openai_api_key = os.environ.get(args.openai_api_key_env)
+    if args.prompt_openai_api_key and not openai_api_key:
+        openai_api_key = getpass.getpass("OpenAI API key (input hidden, optional): ").strip() or None
+    if openai_api_key:
+        print(f"OpenAI causal labeling: enabled via {args.openai_api_key_env if os.environ.get(args.openai_api_key_env) else 'hidden prompt'}")
+    else:
+        print("OpenAI causal labeling: disabled (no API key provided). Causal labels/result pass-fail columns will be left unlabeled.")
+    if args.edit_generator == "openai":
+        if not openai_api_key:
+            raise SystemExit("OpenAI edit generator requested but no API key provided. Set OPENAI_API_KEY or use --prompt-openai-api-key.")
+        print(f"OpenAI counterfactual edit generation: enabled ({args.openai_model}); cache={args.openai_edit_cache}")
+    else:
+        print("Counterfactual edit generation: heuristic rules")
 
     out = generate_counterfactual_for_scored_pairs(
         scored_csv=args.scored_csv,
         out_csv=args.out_csv,
         model_name=args.model_name,
         max_rows=args.max_rows,
+        openai_api_key=openai_api_key,
+        openai_model=args.openai_model,
+        edit_generator=args.edit_generator,
+        openai_edit_cache=args.openai_edit_cache,
     )
     print(f"Wrote counterfactual dataset to {out}")
 
