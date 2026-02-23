@@ -15,7 +15,7 @@ Default model:
 - Ranking and calibration checks
 - Token attribution + attention summaries (observational evidence)
 - Counterfactual edit tests (causal evidence)
-- An interactive dashboard with beginner mode and drilldowns
+- An interactive progressive-disclosure dashboard with drilldowns
 
 ## Quickstart
 ```bash
@@ -29,8 +29,8 @@ python src/generate_attention_dataset.py
 # Optional: enable OpenAI-based expected-direction labels
 # (if OPENAI_API_KEY is already exported, no extra flags are needed)
 # python src/generate_counterfactual_dataset.py
-# Optional: use OpenAI to generate cleaner counterfactual edits too
-# python src/generate_counterfactual_dataset.py --edit-generator openai
+# Optional: use OpenAI-based causal labeling + (default auto) OpenAI edits when key is available
+# python src/generate_counterfactual_dataset.py --prompt-openai-api-key --openai-model gpt-5-mini
 python src/generate_counterfactual_dataset.py
 python src/build_dashboard.py
 ```
@@ -39,33 +39,37 @@ Open:
 - `outputs/dashboard.html`
 
 ## Dashboard Walkthrough
-1. Start at **Top 3 Examples** for quick intuition.
-2. Use **Failure Buckets Summary** to see which edit types fail most.
-3. Click an edit type to drill into **individual query/item examples**.
-4. Click an example row to jump to full detail.
-5. In **Causal Tests**, compare before/after score changes and check whether reaction was expected.
-6. Use **Beginner Mode** for plain-language interpretation, or turn it off for full numeric detail.
+1. Start at **Health Snapshot** to get the overall picture (ranking behavior + score sanity checks).
+2. Use **Focus Finder** to see which edit types and probe buckets fail most.
+3. Click a failure-bucket row or jump-start example to move into the **Drilldown Workspace**.
+4. In **Selected Pair: Behavior Readout**, orient on the query/item, ground-truth label, and model score.
+5. Use the separate **Pairwise Check** card to compare candidate vs comparison item (labels, scores, expected top item, actual top item).
+6. Read **Token Attribution** (observational) for the selected pair, then inspect **Causal Tests** (causal) for stronger evidence.
 
 ## Screenshots
-Overview:
+Top-level overview (goal + health snapshot):
 
 ![Dashboard overview](docs/images/dashboard_overview.png)
 
-Handcrafted seed set overview (balanced sanity-check examples):
+Seed-set context (collapsed section expanded):
 
 ![Dashboard seed overview](docs/images/dashboard_seed_overview.png)
 
-Category/query/pair drilldown:
+Focus finder (failure buckets + weakest categories):
+
+![Dashboard causal summary](docs/images/dashboard_causal_summary.png)
+
+Selected-pair drilldown (query/item + GT label + model output):
 
 ![Dashboard drilldown](docs/images/dashboard_drilldown.png)
 
-Observational diagnostics (token attribution + attention):
+Pairwise check (candidate vs comparison item):
+
+![Dashboard pairwise check](docs/images/dashboard_pairwise_check.png)
+
+Observational diagnostics (token attribution for the selected pair):
 
 ![Dashboard diagnostics](docs/images/dashboard_diagnostics.png)
-
-Causal summary (failure buckets + edit-type outcomes):
-
-![Dashboard causal summary](docs/images/dashboard_causal_summary.png)
 
 Causal drilldown (per-example score changes + text edits):
 
@@ -74,7 +78,7 @@ Causal drilldown (per-example score changes + text edits):
 ## Core Concepts (Plain English)
 - **Observational evidence**: what the model seemed to focus on (attribution, attention).
 - **Causal evidence**: what actually changed in score when we edited text.
-- **Wrong-direction case**: an edit that should decrease relevance but increases score (or vice versa).
+- **ESCI-aware causal verdict**: whether the model's edited score/rank behavior matches the expected edited ESCI label (`E/S/C/I`) after the text change.
 
 ## Counterfactual Edit Types
 Current deterministic edits:
@@ -88,25 +92,49 @@ Each row stores:
 - original vs edited text,
 - before/after model outputs,
 - delta,
-- optional expected direction (OpenAI-labeled when API key is provided),
-- optional pass/fail sign consistency.
+- optional expected edited ESCI label (OpenAI-labeled when API key is provided),
+- derived label transition (for example `S->E`) and expected movement,
+- threshold checks (`E > 0.9`, non-`E < 0.9`),
+- ESCI-aware causal result (`pass`, `fail_order`, `fail_threshold`, `fail_both`, `marginal`, `ambiguous`),
+- legacy expected-direction/sign-consistency fields (kept for backward compatibility).
 
-By default, causal labels are **disabled** (to avoid misleading heuristics). You can enable them at generation time using:
+By default, causal labels are **disabled** when no OpenAI API key is available. If a key is available in `OPENAI_API_KEY`, causal labeling is enabled automatically.
+OpenAI edits now default to **auto** (use OpenAI if key is available, otherwise fallback to heuristics).
+
+Generate with the defaults:
 ```bash
 python src/generate_counterfactual_dataset.py
 ```
-If `OPENAI_API_KEY` is set in your shell, labels are enabled automatically. You can also use `--prompt-openai-api-key` for hidden input.
+If you prefer hidden input for the key, use:
+
+```bash
+python src/generate_counterfactual_dataset.py --prompt-openai-api-key --openai-model gpt-5-mini
+```
+
+You can speed up OpenAI causal labeling (cache-miss-heavy runs) with bounded parallelism:
+
+```bash
+python src/generate_counterfactual_dataset.py --openai-model gpt-5-mini --openai-label-workers 4
+```
 
 ### Optional: OpenAI counterfactual edit generation (cleaner edits)
-Heuristic edits are fast but can create awkward strings in edge cases (for example negation flips). To use OpenAI-generated edits:
+Heuristic edits are fast but can create awkward strings in edge cases (for example negation flips).
+When an OpenAI API key is available, `generate_counterfactual_dataset.py` now uses OpenAI edits by default (`--edit-generator auto`).
+To force OpenAI-generated edits explicitly:
 
 ```bash
 python src/generate_counterfactual_dataset.py --edit-generator openai
 ```
 
+To force heuristic edits (even when a key is set):
+
+```bash
+python src/generate_counterfactual_dataset.py --edit-generator heuristic
+```
+
 OpenAI caches used by the causal pipeline:
 - `outputs/openai_edit_cache.jsonl` (counterfactual edit generation)
-- `outputs/openai_causal_label_cache.jsonl` (expected-direction labels)
+- `outputs/openai_causal_label_cache.jsonl` (expected edited ESCI labels + derived direction labels)
 
 Reruns are much faster once these caches are warm.
 
@@ -182,7 +210,8 @@ python -m unittest discover -s tests -p 'test_*.py'
 ## Troubleshooting (Practical)
 - **Curation looks stuck on ESCI streaming**: the Hugging Face stream can take a while before the first rows arrive; progress logs now print during warmup and collection.
 - **Causal generation feels slow**: OpenAI labeling is network-bound and can be slow on the first run. Check `[CAUSAL]` progress logs and let caches warm (`openai_causal_label_cache.jsonl` / `openai_edit_cache.jsonl`).
+- **OpenAI SSL certificate errors on macOS/Python**: install `certifi` in the venv (`pip install certifi`). The causal pipeline will automatically use `certifi` when available.
 - **Python syntax errors using `python`**: make sure you are using the venv (`source .venv/bin/activate`) so `python` is Python 3, not system Python 2.
 
 ## Scope Note
-This repo is a **toy but practical prototype** for relevance debugging. Counterfactual edits are currently heuristic text edits (not a full production metadata parser).
+This repo is a **toy but practical prototype** for relevance debugging. Counterfactual edits can be heuristic or OpenAI-generated (default auto when a key is present), but they are still a lightweight stress-testing mechanism, not a full production metadata parser.

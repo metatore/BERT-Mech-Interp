@@ -243,7 +243,8 @@ def _build_payload(outputs_dir: Path) -> dict[str, object]:
                 "pass_rate": float(g["group_passed"].mean()) if len(g) else 0.0,
             }
         )
-    categories = sorted(cat_rows, key=lambda x: (-x["pass_rate"], x["question_tag"]))
+    # Triage-first ordering: surface weaker categories first.
+    categories = sorted(cat_rows, key=lambda x: (x["pass_rate"], x["question_tag"]))
 
     # Query-level summary per category + item rows per query.
     queries: dict[str, list[dict[str, object]]] = {}
@@ -285,7 +286,7 @@ def _build_payload(outputs_dir: Path) -> dict[str, object]:
                 )
             items_by_query[key] = items
 
-        queries[str(cat)] = sorted(qrows, key=lambda x: (-x["pass_rate"], x["query"]))
+        queries[str(cat)] = sorted(qrows, key=lambda x: (x["pass_rate"], x["query"]))
 
     # Attribution payload keyed by probe_id.
     attrs_by_probe: dict[str, list[dict[str, object]]] = {}
@@ -327,6 +328,21 @@ def _build_payload(outputs_dir: Path) -> dict[str, object]:
                 "edited_prob",
                 "delta_prob",
                 "sign_consistent",
+                "original_esci_label",
+                "expected_edited_esci_label",
+                "expected_label_transition",
+                "original_rank_in_group",
+                "edited_rank_in_group",
+                "rank_delta_in_group",
+                "actual_rank_movement",
+                "rank_movement_check",
+                "pairwise_esci_order_check",
+                "original_threshold_check",
+                "edited_threshold_check",
+                "threshold_change_status",
+                "threshold_check",
+                "causal_result_v2",
+                "causal_result_reason",
                 "expected_reason",
                 "expected_confidence",
                 "label_source",
@@ -369,6 +385,8 @@ def _build_payload(outputs_dir: Path) -> dict[str, object]:
                             "edited_text": str(r.get("edited_text", "")),
                             "question_tag": str(meta.get("question_tag", "")),
                             "expected_delta_direction": "" if pd.isna(r.get("expected_delta_direction")) else str(r.get("expected_delta_direction", "")),
+                            "expected_edited_esci_label": "" if pd.isna(r.get("expected_edited_esci_label")) else str(r.get("expected_edited_esci_label", "")),
+                            "expected_label_transition": "" if pd.isna(r.get("expected_label_transition")) else str(r.get("expected_label_transition", "")),
                             "expected_reason": "" if pd.isna(r.get("expected_reason")) else str(r.get("expected_reason", "")),
                             "expected_confidence": "" if pd.isna(r.get("expected_confidence")) else str(r.get("expected_confidence", "")),
                             "label_source": "" if pd.isna(r.get("label_source")) else str(r.get("label_source", "")),
@@ -377,29 +395,94 @@ def _build_payload(outputs_dir: Path) -> dict[str, object]:
                             "delta_prob": _safe_float(r.get("delta_prob", 0.0)),
                             "delta_margin": _safe_float(r.get("delta_margin", 0.0)),
                             "sign_consistent": _safe_nullable_bool(r.get("sign_consistent")),
+                            "causal_result_v2": "" if pd.isna(r.get("causal_result_v2")) else str(r.get("causal_result_v2", "")),
+                            "causal_result_reason": "" if pd.isna(r.get("causal_result_reason")) else str(r.get("causal_result_reason", "")),
+                            "original_threshold_check": "" if pd.isna(r.get("original_threshold_check")) else str(r.get("original_threshold_check", "")),
+                            "edited_threshold_check": "" if pd.isna(r.get("edited_threshold_check")) else str(r.get("edited_threshold_check", "")),
+                            "threshold_change_status": "" if pd.isna(r.get("threshold_change_status")) else str(r.get("threshold_change_status", "")),
+                            "threshold_check": "" if pd.isna(r.get("threshold_check")) else str(r.get("threshold_check", "")),
+                            "rank_movement_check": "" if pd.isna(r.get("rank_movement_check")) else str(r.get("rank_movement_check", "")),
+                            "pairwise_esci_order_check": "" if pd.isna(r.get("pairwise_esci_order_check")) else str(r.get("pairwise_esci_order_check", "")),
                         }
                     )
                 edit_examples_by_type[str(edit_type)] = ex_rows
 
-        labeled_causal = causal[causal["sign_consistent"].notna()].copy() if "sign_consistent" in causal.columns else pd.DataFrame()
-        if {"edit_type", "sign_consistent"}.issubset(labeled_causal.columns) and len(labeled_causal):
-            by_edit = (
-                labeled_causal.groupby("edit_type")["sign_consistent"]
-                .agg(num_tests="count", sign_consistency="mean")
-                .reset_index()
-                .sort_values(["sign_consistency", "num_tests"], ascending=[True, False])
-            )
-            for _, r in by_edit.iterrows():
-                failure_by_edit_type.append(
-                    {
-                        "edit_type": str(r["edit_type"]),
-                        "num_tests": int(r["num_tests"]),
-                        "sign_consistency": float(r["sign_consistency"]),
-                        "failure_rate": float(1.0 - float(r["sign_consistency"])),
-                    }
+        if {"edit_type", "causal_result_v2"}.issubset(causal.columns):
+            labeled_causal = causal[causal["causal_result_v2"].notna()].copy()
+            if len(labeled_causal):
+                labeled_causal["is_fail_v2"] = labeled_causal["causal_result_v2"].map(lambda x: str(x).startswith("fail"))
+                labeled_causal["is_pass_v2"] = labeled_causal["causal_result_v2"].map(lambda x: str(x) == "pass")
+                labeled_causal["is_fail_order_v2"] = labeled_causal["causal_result_v2"].map(lambda x: str(x) in {"fail_order", "fail_both"})
+                labeled_causal["is_fail_threshold_v2"] = labeled_causal["causal_result_v2"].map(lambda x: str(x) in {"fail_threshold", "fail_both"})
+                labeled_causal["is_fail_both_v2"] = labeled_causal["causal_result_v2"].map(lambda x: str(x) == "fail_both")
+                by_edit = (
+                    labeled_causal.groupby("edit_type")
+                    .agg(
+                        num_tests=("causal_result_v2", "count"),
+                        fail_rate=("is_fail_v2", "mean"),
+                        pass_rate=("is_pass_v2", "mean"),
+                        fail_order_rate=("is_fail_order_v2", "mean"),
+                        fail_threshold_rate=("is_fail_threshold_v2", "mean"),
+                        fail_both_rate=("is_fail_both_v2", "mean"),
+                        fail_order_count=("is_fail_order_v2", "sum"),
+                        fail_threshold_count=("is_fail_threshold_v2", "sum"),
+                        fail_both_count=("is_fail_both_v2", "sum"),
+                    )
+                    .reset_index()
+                    .sort_values(["fail_rate", "num_tests"], ascending=[False, False])
                 )
+                for _, r in by_edit.iterrows():
+                    failure_by_edit_type.append(
+                        {
+                            "edit_type": str(r["edit_type"]),
+                            "num_tests": int(r["num_tests"]),
+                            "sign_consistency": float(1.0 - float(r["fail_rate"])),
+                            "failure_rate": float(r["fail_rate"]),
+                            "fail_order_rate": float(r["fail_order_rate"]),
+                            "fail_threshold_rate": float(r["fail_threshold_rate"]),
+                            "fail_both_rate": float(r["fail_both_rate"]),
+                            "fail_order_count": int(r["fail_order_count"]),
+                            "fail_threshold_count": int(r["fail_threshold_count"]),
+                            "fail_both_count": int(r["fail_both_count"]),
+                            "summary_mode": "v2_failure_breakdown",
+                        }
+                    )
+        else:
+            labeled_causal = causal[causal["sign_consistent"].notna()].copy() if "sign_consistent" in causal.columns else pd.DataFrame()
+            if {"edit_type", "sign_consistent"}.issubset(labeled_causal.columns) and len(labeled_causal):
+                by_edit = (
+                    labeled_causal.groupby("edit_type")["sign_consistent"]
+                    .agg(num_tests="count", sign_consistency="mean")
+                    .reset_index()
+                    .sort_values(["sign_consistency", "num_tests"], ascending=[True, False])
+                )
+                for _, r in by_edit.iterrows():
+                    failure_by_edit_type.append(
+                        {
+                            "edit_type": str(r["edit_type"]),
+                            "num_tests": int(r["num_tests"]),
+                            "sign_consistency": float(r["sign_consistency"]),
+                            "failure_rate": float(1.0 - float(r["sign_consistency"])),
+                        }
+                    )
 
-        if {"sign_consistent", "delta_margin", "probe_id", "query", "edit_type"}.issubset(causal.columns):
+        if {"causal_result_v2", "delta_margin", "probe_id", "query", "edit_type"}.issubset(causal.columns):
+            wrong = causal[causal["causal_result_v2"].map(lambda x: str(x).startswith("fail"))].copy()
+            if len(wrong):
+                wrong["abs_delta_margin"] = wrong["delta_margin"].map(lambda x: abs(_safe_float(x)))
+                wrong = wrong.sort_values("abs_delta_margin", ascending=False).head(15)
+                wrong_direction_examples = [
+                    {
+                        "probe_id": str(r.get("probe_id", "")),
+                        "query": str(r.get("query", "")),
+                        "edit_type": str(r.get("edit_type", "")),
+                        "expected_delta_direction": "" if pd.isna(r.get("expected_delta_direction")) else str(r.get("expected_delta_direction", "")),
+                        "delta_margin": _safe_float(r.get("delta_margin", 0.0)),
+                        "sign_consistent": _safe_nullable_bool(r.get("sign_consistent")),
+                    }
+                    for _, r in wrong.iterrows()
+                ]
+        elif {"sign_consistent", "delta_margin", "probe_id", "query", "edit_type"}.issubset(causal.columns):
             wrong = causal[causal["sign_consistent"] == False].copy()  # noqa: E712
             if len(wrong):
                 wrong["abs_delta_margin"] = wrong["delta_margin"].map(lambda x: abs(_safe_float(x)))
@@ -419,7 +502,10 @@ def _build_payload(outputs_dir: Path) -> dict[str, object]:
         # Curated examples for non-technical quick entry.
         if "delta_margin" in causal.columns:
             causal["abs_delta_margin"] = causal["delta_margin"].map(lambda x: abs(_safe_float(x)))
-            if "sign_consistent" in causal.columns:
+            if "causal_result_v2" in causal.columns:
+                stable = causal[causal["causal_result_v2"] == "pass"].copy()
+                wrong = causal[causal["causal_result_v2"].map(lambda x: str(x).startswith("fail"))].copy()
+            elif "sign_consistent" in causal.columns:
                 stable = causal[causal["sign_consistent"] == True].copy()  # noqa: E712
                 wrong = causal[causal["sign_consistent"] == False].copy()  # noqa: E712
             else:
@@ -579,10 +665,35 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
     .controls {{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:6px 0 10px 0; }}
     .controls label {{ font-size:12px; color:var(--muted); }}
     .controls select {{ border:1px solid var(--line); border-radius:8px; padding:4px 8px; background:#fff; }}
+    .ui-select {{
+      border:1px solid var(--line);
+      border-radius:8px;
+      padding:6px 30px 6px 10px;
+      background:
+        linear-gradient(45deg, transparent 50%, #64748b 50%),
+        linear-gradient(135deg, #64748b 50%, transparent 50%),
+        linear-gradient(#fff, #fff);
+      background-position:
+        calc(100% - 16px) calc(50% - 2px),
+        calc(100% - 11px) calc(50% - 2px),
+        0 0;
+      background-size: 5px 5px, 5px 5px, 100% 100%;
+      background-repeat: no-repeat;
+      color: var(--text);
+      font-size: 13px;
+      line-height: 1.2;
+      appearance: none;
+      -webkit-appearance: none;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.7);
+    }}
+    .ui-select:hover {{ border-color:#cbd5e1; background-color:#fcfdff; }}
+    .ui-select:focus {{
+      outline: none;
+      border-color: #0ea5e9;
+      box-shadow: 0 0 0 3px rgba(14,165,233,0.15);
+    }}
     tr.warnrow td {{ background:#fff1f2; }}
     .small-note {{ font-size:12px; color:var(--muted); }}
-    .mode-toggle {{ display:flex; align-items:center; gap:8px; margin: 0 0 12px 0; }}
-    .mode-toggle input {{ transform: scale(1.05); }}
     .examples-strip {{ display:grid; grid-template-columns: repeat(3, minmax(220px, 1fr)); gap:10px; }}
     .example-card {{ border:1px solid var(--line); border-radius:10px; background:#fcfdff; padding:10px; cursor:pointer; }}
     .example-card:hover {{ background:#f8fbff; }}
@@ -603,6 +714,244 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
     .story-card {{ border:1px solid var(--line); border-radius:10px; background:#f8fafc; padding:10px; margin-bottom:10px; }}
     .banner {{ border:1px solid #fcd34d; background:#fffbeb; color:#78350f; border-radius:10px; padding:10px 12px; margin: 0 0 12px 0; }}
     .banner code {{ background:#fff7d6; padding:1px 4px; border-radius:4px; }}
+    .hero {{
+      background:
+        radial-gradient(circle at 10% 5%, rgba(20,184,166,0.10), transparent 45%),
+        radial-gradient(circle at 90% 10%, rgba(14,165,233,0.08), transparent 40%),
+        #ffffff;
+    }}
+    .hero-grid {{ display:grid; grid-template-columns: 1.1fr 0.9fr; gap:12px; align-items:start; }}
+    .hero-title {{ margin:0; font-size:28px; line-height:1.15; }}
+    .hero-subtitle {{ margin:6px 0 0 0; color:var(--muted); line-height:1.45; }}
+    .step-list {{ margin:8px 0 0 18px; padding:0; line-height:1.5; font-size:14px; color:#334155; }}
+    .legend-row {{ display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }}
+    .section-kicker {{ font-size:11px; letter-spacing:0.08em; text-transform:uppercase; color:#0f766e; font-weight:700; }}
+    .flow-grid {{ display:grid; grid-template-columns: 1.1fr 0.9fr; gap:12px; }}
+    .focus-grid {{ display:grid; grid-template-columns: 1.15fr 0.85fr; gap:12px; }}
+    .triage-card {{ border:1px solid var(--line); border-radius:10px; background:#fcfdff; padding:10px; }}
+    .triage-card h3 {{ margin:0 0 6px 0; font-size:15px; }}
+    .triage-card ul {{ margin:6px 0 0 18px; padding:0; line-height:1.45; }}
+    .workspace-selectors {{ display:grid; grid-template-columns: 0.8fr 1fr 1.2fr; gap:12px; margin-top:10px; }}
+    .selector-card {{ border:1px solid var(--line); border-radius:10px; padding:10px; background:#fcfdff; }}
+    .selector-card h3 {{ margin:0 0 6px 0; font-size:15px; }}
+    .selector-sub {{ font-size:12px; color:var(--muted); margin-bottom:6px; }}
+    .detail-shell {{ margin-top:12px; border:1px solid var(--line); border-radius:12px; padding:12px; background:#fff; }}
+    details.fold {{ border:1px solid var(--line); border-radius:10px; background:#fff; margin-top:10px; overflow:hidden; }}
+    details.fold > summary {{
+      cursor:pointer;
+      list-style:none;
+      padding:10px 12px;
+      font-weight:600;
+      background:#f8fafc;
+      border-bottom:1px solid transparent;
+    }}
+    details.fold[open] > summary {{ border-bottom-color:var(--line); }}
+    details.fold > summary::-webkit-details-marker {{ display:none; }}
+    details.fold > summary::before {{
+      content:"+";
+      display:inline-block;
+      width:16px;
+      color:#0f766e;
+      font-weight:700;
+    }}
+    details.fold[open] > summary::before {{ content:"-"; }}
+    .fold-body {{ padding:10px; }}
+    .selected-row td {{ background:#ecfeff !important; }}
+    .table-note {{ font-size:12px; color:var(--muted); margin:0 0 6px 0; }}
+    .help-tip {{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      width:16px;
+      height:16px;
+      border-radius:999px;
+      border:1px solid #cbd5e1;
+      color:#475569;
+      font-size:11px;
+      font-weight:700;
+      background:#fff;
+      cursor:help;
+      vertical-align:middle;
+      margin-left:4px;
+    }}
+    .pair-grid {{ display:grid; grid-template-columns: 1fr 1.2fr 0.9fr; gap:10px; margin-top:10px; }}
+    .pair-panel {{ border:1px solid #cfd8e3; border-radius:12px; background:#fbfdff; padding:12px 14px; min-height:92px; }}
+    .pair-panel .k {{ font-size:11px; margin-bottom:7px; color:#475569; }}
+    .pair-panel .vtext {{ font-size:18px; font-weight:600; line-height:1.35; color:#0f172a; letter-spacing:-0.01em; }}
+    .readout-grid {{ display:grid; grid-template-columns: 1fr; gap:10px; margin-top:10px; }}
+    .readout-card {{ border:1px solid var(--line); border-radius:10px; padding:10px; background:#fff; }}
+    .readout-card h3 {{ margin:0 0 6px 0; font-size:14px; }}
+    .readout-head {{ display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:6px; }}
+    .readout-head h3 {{ margin:0; }}
+    .readout-primary {{ margin-bottom:8px; }}
+    .readout-big {{ font-size:22px; font-weight:700; line-height:1.1; }}
+    .readout-sub {{ font-size:12px; color:var(--muted); margin-top:4px; line-height:1.35; }}
+    .readout-sub strong {{ color:#334155; }}
+    .gt-pill {{ display:inline-block; padding:4px 10px; border-radius:999px; font-weight:700; border:1px solid var(--line); }}
+    .gt-Exact {{ background:#dcfce7; color:#14532d; border-color:#bbf7d0; }}
+    .gt-Substitute {{ background:#dbeafe; color:#1e3a8a; border-color:#bfdbfe; }}
+    .gt-Complement {{ background:#fef3c7; color:#92400e; border-color:#fde68a; }}
+    .gt-Irrelevant {{ background:#fee2e2; color:#991b1b; border-color:#fecaca; }}
+    .score-bar {{ margin-top:8px; }}
+    .score-bar-track {{ height:10px; background:#e2e8f0; border-radius:999px; overflow:hidden; }}
+    .score-bar-fill {{ height:10px; background:linear-gradient(90deg,#0891b2,#0f766e); }}
+    .direction-chip {{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding:6px 10px;
+      border-radius:999px;
+      border:1px solid var(--line);
+      font-weight:600;
+      font-size:13px;
+      background:#f8fafc;
+    }}
+    .dir-ok {{ background:#ecfdf5; color:#065f46; border-color:#a7f3d0; }}
+    .dir-bad {{ background:#fef2f2; color:#991b1b; border-color:#fecaca; }}
+    .dir-neutral {{ background:#f8fafc; color:#334155; border-color:#e2e8f0; }}
+    .inline-sep {{ color:#cbd5e1; margin:0 6px; }}
+    .check-line {{ margin-top:6px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }}
+    .check-chip {{
+      display:inline-flex;
+      align-items:center;
+      gap:5px;
+      border-radius:999px;
+      padding:3px 8px;
+      font-size:12px;
+      font-weight:700;
+      border:1px solid var(--line);
+      background:#fff;
+    }}
+    .check-pass {{ color:#065f46; background:#ecfdf5; border-color:#a7f3d0; }}
+    .check-fail {{ color:#991b1b; background:#fef2f2; border-color:#fecaca; }}
+    .causal-stack {{ display:grid; gap:10px; }}
+    .causal-case {{ border:1px solid var(--line); border-radius:10px; background:#fff; padding:10px; }}
+    .causal-case.fail {{ border-color:#fecaca; background:#fff8f8; }}
+    .causal-case.pass {{ border-color:#a7f3d0; background:#f8fffb; }}
+    .causal-case-head {{ display:flex; justify-content:space-between; align-items:flex-start; gap:10px; flex-wrap:wrap; }}
+    .causal-case-title {{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }}
+    .causal-edit-pill {{ font-weight:700; }}
+    .causal-case-body {{ display:grid; grid-template-columns: 1.35fr 0.9fr; gap:10px; margin-top:8px; }}
+    .causal-case-change {{ border:1px dashed var(--line); border-radius:8px; background:#fcfdff; padding:8px; }}
+    .causal-case-score {{ border:1px solid var(--line); border-radius:8px; background:#fcfdff; padding:8px; }}
+    .causal-case-meta {{ margin-top:8px; font-size:12px; color:#64748b; }}
+    .paircheck-stack {{ display:grid; gap:8px; }}
+    .paircheck-row {{ font-size:13px; line-height:1.35; color:#334155; }}
+    .paircheck-row strong {{ color:#0f172a; }}
+    .pair-item-card {{
+      border:1px solid var(--line);
+      border-radius:10px;
+      background:#fcfdff;
+      padding:8px 10px;
+    }}
+    .pair-item-card .k {{ font-size:11px; color:#64748b; margin-bottom:5px; }}
+    .pair-item-line {{ display:flex; align-items:flex-start; gap:8px; flex-wrap:wrap; }}
+    .pair-item-text {{ font-size:15px; font-weight:600; line-height:1.35; color:#0f172a; }}
+    .pair-rel-row {{
+      display:flex;
+      align-items:center;
+      gap:8px;
+      flex-wrap:wrap;
+      font-size:13px;
+      color:#334155;
+    }}
+    .pair-rel-two {{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap:8px;
+      align-items:start;
+    }}
+    .pair-rel-cell {{
+      display:flex;
+      align-items:center;
+      gap:6px;
+      flex-wrap:wrap;
+      font-size:13px;
+      color:#334155;
+    }}
+    .pair-rel-badge {{
+      display:inline-flex;
+      align-items:center;
+      border:1px solid #cbd5e1;
+      border-radius:999px;
+      padding:4px 10px;
+      background:#f8fafc;
+      color:#1f2937;
+      font-weight:700;
+      font-size:12px;
+      line-height:1;
+    }}
+    .pair-rel-badge.good {{ border-color:#bbf7d0; background:#ecfdf5; color:#065f46; }}
+    .pair-rel-badge.bad {{ border-color:#fecaca; background:#fef2f2; color:#991b1b; }}
+    .pair-rel-badge.neutral {{ border-color:#e2e8f0; background:#f8fafc; color:#475569; }}
+    .mini-score-card {{
+      border:1px solid var(--line);
+      border-radius:10px;
+      background:#fcfdff;
+      padding:8px 10px;
+      margin-top:6px;
+    }}
+    .mini-score-head {{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:8px;
+      margin-bottom:6px;
+    }}
+    .mini-score-label {{ font-size:12px; color:#475569; font-weight:600; }}
+    .mini-score-value {{ font-size:18px; font-weight:700; color:#0f172a; }}
+    .mini-score-track {{ height:8px; background:#e2e8f0; border-radius:999px; overflow:hidden; }}
+    .mini-score-fill {{ height:8px; background:linear-gradient(90deg,#0891b2,#0f766e); }}
+    .gt-card-text {{ font-size:12px; color:#64748b; line-height:1.4; }}
+    .pairwise-block {{ margin-top:12px; }}
+    .pairwise-query-card {{
+      border:1px solid var(--line);
+      border-radius:10px;
+      background:#fcfdff;
+      padding:10px;
+      margin-top:8px;
+    }}
+    .pairwise-query-card .k {{ font-size:11px; color:#64748b; margin-bottom:4px; }}
+    .pairwise-query-card .vtext {{ font-size:16px; font-weight:600; line-height:1.35; color:#0f172a; }}
+    .pairwise-compare-grid {{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap:10px;
+      margin-top:10px;
+    }}
+    .pairwise-col {{ border:1px solid var(--line); border-radius:10px; background:#fff; padding:10px; }}
+    .pairwise-col h4 {{ margin:0 0 8px 0; font-size:13px; }}
+    .pairwise-label-row {{ margin-top:8px; }}
+    .pairwise-score-box {{ margin-top:8px; }}
+    .pairwise-score-box .mini-score-card {{ margin-top:0; }}
+    .pairwise-outcome-grid {{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap:10px;
+      margin-top:10px;
+    }}
+    .pairwise-outcome-cell {{
+      border:1px solid var(--line);
+      border-radius:10px;
+      background:#fcfdff;
+      padding:10px;
+    }}
+    .pairwise-outcome-cell .k {{ font-size:11px; color:#64748b; margin-bottom:6px; }}
+    .rank-visual {{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding:4px 8px;
+      border:1px solid var(--line);
+      border-radius:999px;
+      background:#f8fafc;
+      font-weight:700;
+      color:#1f2937;
+      font-size:12px;
+    }}
+    .rank-visual.bad {{ border-color:#fecaca; background:#fef2f2; color:#991b1b; }}
+    .rank-visual.good {{ border-color:#cbd5e1; background:#f8fafc; color:#1f2937; }}
+    .paircheck-result-row {{ margin-top:2px; }}
     @media (max-width: 980px) {{
       .grid {{ grid-template-columns: repeat(2, minmax(160px, 1fr)); }}
       .layout {{ grid-template-columns: 1fr; }}
@@ -611,69 +960,82 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
       .calib-grid {{ grid-template-columns: 1fr; }}
       .examples-strip {{ grid-template-columns: 1fr; }}
       .seed-grid {{ grid-template-columns: 1fr; }}
+      .hero-grid {{ grid-template-columns: 1fr; }}
+      .flow-grid {{ grid-template-columns: 1fr; }}
+      .focus-grid {{ grid-template-columns: 1fr; }}
+      .workspace-selectors {{ grid-template-columns: 1fr; }}
+      .pair-grid {{ grid-template-columns: 1fr; }}
+      .readout-grid {{ grid-template-columns: 1fr; }}
+      .pairwise-compare-grid {{ grid-template-columns: 1fr; }}
+      .pairwise-outcome-grid {{ grid-template-columns: 1fr; }}
+      .causal-case-body {{ grid-template-columns: 1fr; }}
+      .pair-rel-two {{ grid-template-columns: 1fr; }}
     }}
   </style>
 </head>
 <body>
   <div class=\"wrap\">
-    <h1 class=\"title\">E-commerce Relevance Mech-Interp Dashboard</h1>
-    <p class=\"subtitle\">Progressive drill-down: Overview → Category → Query → Query-item diagnostics</p>
-    <div class=\"mode-toggle\">
-      <input id=\"mode-toggle\" type=\"checkbox\" checked />
-      <label for=\"mode-toggle\"><strong>Beginner Mode</strong> (plain language + visual explanations)</label>
-    </div>
-    <div id=\"causal-labeling-banner\"></div>
-
-    <div class=\"card\">
-      <h2 class=\"section-title\">Start Here: Top 3 Examples</h2>
-      <div class=\"explain\">
-        Click one of these examples to jump straight to an important case.
-      </div>
-      <div style=\"height:10px\"></div>
-      <div class=\"examples-strip\" id=\"top-examples\"></div>
-    </div>
-
-    <div class=\"card\">
-      <h2 class=\"section-title\">Handcrafted Seed Set Overview</h2>
-      <div class=\"explain\">
-        These are the manually designed examples used as the core sanity-check set. They are intentionally small and balanced across failure modes.
-      </div>
-      <div style=\"height:10px\"></div>
-      <div class=\"seed-grid\">
+    <div class=\"card hero\">
+      <div class=\"hero-grid\">
         <div>
-          <div class=\"grid\" id=\"seed-overview-cards\"></div>
+          <div class=\"section-kicker\">Dashboard Goal</div>
+          <h1 class=\"hero-title\">Debug why the ranking model behaves the way it does</h1>
+          <p class=\"hero-subtitle\">
+            This dashboard is for <strong>hypothesis testing</strong>, not just inspection. Start with overall health, find a failure pattern, then drill into one query-item example and test whether the model reacts correctly to controlled edits.
+          </p>
+          <div class=\"legend-row\">
+            <span class=\"badge obs\">Observational = clues (saliency, attention)</span>
+            <span class=\"badge causal\">Causal = stronger evidence (counterfactual edits)</span>
+          </div>
+          <div id=\"causal-labeling-banner\" style=\"margin-top:10px\"></div>
+        </div>
+        <div>
+          <div class=\"triage-card\">
+            <h3>How To Use This Page</h3>
+            <ol class=\"step-list\">
+              <li>Check whether the model looks broadly healthy.</li>
+              <li>Pick the biggest failure bucket or weakest category.</li>
+              <li>Drill into a query-item pair and inspect causal tests first.</li>
+            </ol>
+            <div class=\"small-note\" style=\"margin-top:10px\">
+              This dashboard is always shown in the plain-language version.
+            </div>
+          </div>
+          <div class=\"triage-card\" id=\"triage-guidance\" style=\"margin-top:10px\"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class=\"card\">
+      <h2 class=\"section-title\">1. Health Snapshot (What is the model good/bad at?)</h2>
+      <div class=\"explain\">
+        First pass: scan directional ranking performance and score calibration. Then use the examples below to jump directly into a representative success or failure.
+      </div>
+      <div style=\"height:10px\"></div>
+      <div class=\"flow-grid\">
+        <div>
+          <div class=\"muted\" style=\"margin-bottom:8px\">
+            Ranking behavior snapshot
+            <span class=\"help-tip\" title=\"Shows whether the model puts the 'should rank higher' item above the 'should rank lower' item within each test group. Think: who beats whom in the ranking?\">?</span>
+          </div>
+          <div class=\"grid\" id=\"overview-cards\"></div>
           <div style=\"height:10px\"></div>
-          <div class=\"muted\" style=\"margin-bottom:8px\">Seed rows by category</div>
-          <div class=\"table-wrap\" id=\"seed-tag-table\"></div>
+          <div class=\"muted\" style=\"margin-bottom:8px\">
+            Score sanity checks
+            <span class=\"help-tip\" title=\"Checks whether score magnitudes themselves make sense (not just ordering). Example: Exact matches should usually get high scores, and irrelevant items should not get very high scores.\">?</span>
+          </div>
+          <div class=\"grid\" id=\"absolute-cards\"></div>
         </div>
         <div>
-          <div class=\"muted\" style=\"margin-bottom:8px\">Example handcrafted pairs</div>
-          <div id=\"seed-example-pairs\"></div>
+          <div class=\"muted\" style=\"margin-bottom:8px\">Jump-start examples</div>
+          <div class=\"table-note\">Click to jump to the corresponding drilldown case.</div>
+          <div class=\"examples-strip\" id=\"top-examples\"></div>
         </div>
       </div>
-    </div>
-
-    <div class=\"card\">
-      <h2 class=\"section-title\">What Was Analyzed</h2>
-      <div class=\"explain\">
-        This is a ranking evaluation. For each query, the model scores candidate items. A group passes when the item expected to rank higher actually receives a higher model score.
-        Ground truth labels are mapped as: Exact=3, Substitute=2, Complement=1, Irrelevant=0.
-      </div>
-      <div style=\"height:10px\"></div>
-      <div class=\"grid\" id=\"overview-cards\"></div>
-    </div>
-
-    <div class=\"card\">
-      <h2 class=\"section-title\">Score Calibration Snapshot</h2>
-      <div class=\"explain\">
-        Secondary evaluation checks absolute separation. Target policy: Exact should score above threshold, Non-Exact should score below.
-      </div>
-      <div style=\"height:10px\"></div>
-      <div class=\"grid\" id=\"absolute-cards\"></div>
       <div style=\"height:10px\"></div>
       <div class=\"calib-grid\">
         <div class=\"chart-wrap\">
-          <div class=\"muted\" style=\"margin-bottom:8px\">Model score by ground-truth label (x-axis: score 0→1)</div>
+          <div class=\"muted\" style=\"margin-bottom:8px\">Interactive plot: Model score by ground-truth label</div>
           <svg id=\"label-score-chart\" viewBox=\"0 0 760 250\" style=\"width:100%; height:auto;\"></svg>
         </div>
         <div>
@@ -681,107 +1043,206 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
           <div class=\"table-wrap\" id=\"label-summary-table\"></div>
         </div>
       </div>
+
+      <details class=\"fold\">
+        <summary>Show seed-set context (handcrafted sanity-check examples)</summary>
+        <div class=\"fold-body\">
+          <div class=\"explain\">
+            These are the manually designed examples that anchor the sanity checks. Keep this collapsed during normal triage; open it when you want to verify coverage.
+          </div>
+          <div style=\"height:10px\"></div>
+          <div class=\"seed-grid\">
+            <div>
+              <div class=\"grid\" id=\"seed-overview-cards\"></div>
+              <div style=\"height:10px\"></div>
+              <div class=\"muted\" style=\"margin-bottom:8px\">Seed rows by category</div>
+              <div class=\"table-wrap\" id=\"seed-tag-table\"></div>
+            </div>
+            <div>
+              <div class=\"muted\" style=\"margin-bottom:8px\">Example handcrafted pairs</div>
+              <div id=\"seed-example-pairs\"></div>
+            </div>
+          </div>
+        </div>
+      </details>
     </div>
 
     <div class=\"card\">
-      <h2 class=\"section-title\">Failure Buckets Summary <span class=\"badge causal\">Causal</span></h2>
+      <h2 class=\"section-title\">2. Focus Finder (Where should we investigate next?)</h2>
       <div class=\"explain\">
-        This section summarizes counterfactual stress tests by edit type and highlights biggest wrong-direction deltas.
+        Use causal failures and weak categories to choose a debugging target. Tables are sorted to surface the riskiest patterns first.
       </div>
       <div style=\"height:10px\"></div>
-      <div class=\"two-col\">
+      <div class=\"focus-grid\">
         <div>
-          <div class=\"muted\" style=\"margin-bottom:8px\">Sign-consistency by edit type</div>
-          <div class=\"table-wrap\" id=\"failure-by-edit\"></div>
+          <div class=\"muted\" style=\"margin-bottom:8px\">Failure buckets by counterfactual edit type <span class=\"badge causal\">Causal</span></div>
+          <div class=\"two-col\">
+            <div>
+              <div class=\"table-wrap\" id=\"failure-by-edit\"></div>
+            </div>
+            <div>
+              <div class=\"table-note\">Largest wrong-direction reactions (click a row in the left table to inspect an edit type).</div>
+              <div class=\"table-wrap\" id=\"failure-wrong\"></div>
+            </div>
+          </div>
+          <div style=\"height:10px\"></div>
+          <div style=\"display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;\">
+            <div class=\"muted\" id=\"failure-drilldown-label\">Edit type drilldown: click a row above to see individual examples</div>
+            <div class=\"muted\" style=\"display:flex; align-items:center; gap:8px;\">
+              <label for=\"failure-result-filter\">Result filter</label>
+              <select id=\"failure-result-filter\" class=\"ui-select\"></select>
+            </div>
+          </div>
+          <div class=\"table-wrap\" id=\"failure-edit-drilldown\"></div>
         </div>
         <div>
-          <div class=\"muted\" style=\"margin-bottom:8px\">Top wrong-direction examples</div>
-          <div class=\"table-wrap\" id=\"failure-wrong\"></div>
+          <div class=\"muted\" style=\"margin-bottom:8px\">Weakest categories first (click to start drilldown)</div>
+          <div class=\"table-wrap\"><table id=\"categories-table\"></table></div>
+          <details class=\"fold\">
+            <summary>Why these categories matter</summary>
+            <div class=\"fold-body\">
+              <div class=\"small-note\">
+                A category here is a probe bucket (`question_tag`). Lower pass rate means more directional ranking mismatches inside that bucket, so it is usually a better debugging starting point than a high-level average.
+              </div>
+            </div>
+          </details>
         </div>
-      </div>
-      <div style=\"height:10px\"></div>
-      <div>
-        <div class=\"muted\" id=\"failure-drilldown-label\">Edit type drilldown: click a row above to see individual examples</div>
-        <div class=\"table-wrap\" id=\"failure-edit-drilldown\"></div>
       </div>
     </div>
 
     <div class=\"card\">
-      <h2 class=\"section-title\">Step 1: Choose Category</h2>
-      <div class=\"table-wrap\"><table id=\"categories-table\"></table></div>
-    </div>
+      <h2 class=\"section-title\">3. Drilldown Workspace (Category → Query → Pair → Evidence)</h2>
+      <div class=\"explain\">
+        Start with a category, then a query, then a specific query-item pair. In the evidence area below, first orient on the pair and score checks, then use token attribution to understand the original score, then inspect causal tests.
+      </div>
+      <div class=\"workspace-selectors\">
+        <div class=\"selector-card pane\">
+          <h3>Choose Category</h3>
+          <div class=\"selector-sub\">Failure-first list of probe buckets</div>
+          <div class=\"table-wrap\"><table id=\"categories-table-workspace\"></table></div>
+        </div>
 
-    <div class=\"layout\">
-      <div class=\"card pane\">
-        <h2 class=\"section-title\">Step 2: Choose Query</h2>
-        <div id=\"selected-category\" class=\"muted\"></div>
-        <div style=\"height:8px\"></div>
-        <div class=\"table-wrap\"><table id=\"queries-table\"></table></div>
+        <div class=\"selector-card pane\">
+          <h3>Choose Query</h3>
+          <div id=\"selected-category\" class=\"selector-sub\">Select a category</div>
+          <div class=\"table-wrap\"><table id=\"queries-table\"></table></div>
+        </div>
+
+        <div class=\"selector-card pane\">
+          <h3>Choose Query-Item Pair</h3>
+          <div id=\"selected-query\" class=\"selector-sub\">Select a query</div>
+          <div class=\"table-wrap\"><table id=\"items-table\"></table></div>
+        </div>
       </div>
 
-      <div class=\"card pane\">
-        <h2 class=\"section-title\">Step 3: Choose Query-Item Pair</h2>
-        <div id=\"selected-query\" class=\"muted\"></div>
-        <div style=\"height:8px\"></div>
-        <div class=\"table-wrap\"><table id=\"items-table\"></table></div>
-      </div>
-    </div>
-
-    <div class=\"card\" id=\"detail-card\">
-      <h2 class=\"section-title\">Step 4: Inspect Model Behavior</h2>
-      <div class=\"explain\">Green tokens pushed relevance up. Red tokens pushed down. Darker color means stronger influence. Attention is supporting evidence; causal edits are stronger behavior checks.</div>
-      <div class=\"meta-grid\">
-        <div class=\"meta\"><div class=\"k\">Ground Truth Label</div><div class=\"v\" id=\"meta-label\">-</div></div>
-        <div class=\"meta\"><div class=\"k\">Ground Truth Score</div><div class=\"v\" id=\"meta-rel\">-</div></div>
-        <div class=\"meta\"><div class=\"k\">Model Output Score</div><div class=\"v\" id=\"meta-model\">-</div></div>
-        <div class=\"meta\"><div class=\"k\">Expected Direction</div><div class=\"v\" id=\"meta-exp\">-</div></div>
-      </div>
-      <div class=\"small-note\" id=\"tag-provenance\"></div>
-      <div id=\"pair-query\" class=\"pair-text\"></div>
-      <div id=\"pair-item\" class=\"pair-text\"></div>
-      <div id=\"what-this-means\" class=\"story-card\"></div>
-
-      <div class=\"two-col\">
-        <div class=\"card\">
-          <h3 style=\"margin-top:0\">Query Token Attribution <span class=\"badge obs\">Observational</span></h3>
-          <div id=\"query-cloud\"></div>
-          <div class=\"two-col\" style=\"margin-top:8px\">
-            <div><strong>Helpful query tokens</strong><div id=\"q-pos\" class=\"table-wrap\"></div></div>
-            <div><strong>Harmful query tokens</strong><div id=\"q-neg\" class=\"table-wrap\"></div></div>
+      <div id=\"detail-card\" class=\"detail-shell\">
+        <h2 class=\"section-title\" style=\"margin-bottom:6px\">Selected Pair: Behavior Readout</h2>
+        <div class=\"pair-grid\">
+          <div id=\"pair-query\" class=\"pair-panel\"></div>
+          <div id=\"pair-item\" class=\"pair-panel\"></div>
+          <div class=\"readout-card\">
+            <div class=\"readout-head\"><h3>Ground Truth (human label)</h3></div>
+            <div id=\"meta-label\" class=\"readout-primary\">-</div>
+            <div id=\"meta-rel\" class=\"gt-card-text\">-</div>
           </div>
         </div>
-        <div class=\"card\">
-          <h3 style=\"margin-top:0\">Item Token Attribution <span class=\"badge obs\">Observational</span></h3>
-          <div id=\"item-cloud\"></div>
-          <div class=\"two-col\" style=\"margin-top:8px\">
-            <div><strong>Helpful item tokens</strong><div id=\"i-pos\" class=\"table-wrap\"></div></div>
-            <div><strong>Harmful item tokens</strong><div id=\"i-neg\" class=\"table-wrap\"></div></div>
+        <div class=\"readout-grid\">
+          <div class=\"readout-card\">
+            <div class=\"readout-head\"><h3>Model Output (continuous score)</h3></div>
+            <div id=\"meta-model-status\" class=\"readout-primary\"></div>
+            <div id=\"meta-model\" class=\"readout-big\">-</div>
+            <div class=\"score-bar\">
+              <div class=\"score-bar-track\"><div id=\"meta-model-bar\" class=\"score-bar-fill\" style=\"width:0%\"></div></div>
+            </div>
+            <div class=\"readout-sub\" id=\"meta-model-note\">0 to 1 score scale</div>
+            <div id=\"meta-model-check\" class=\"readout-sub\"></div>
           </div>
         </div>
+        <div class=\"small-note\" id=\"tag-provenance\"></div>
+
+      <div class=\"card pairwise-block\" id=\"pairwise-card\">
+        <h3 style=\"margin-top:0\">Pairwise Check (vs matched item)</h3>
+        <div id=\"pairwise-status\" class=\"readout-primary\"></div>
+        <div id=\"pairwise-query\" class=\"pairwise-query-card\"></div>
+        <div class=\"pairwise-compare-grid\">
+          <div class=\"pairwise-col\">
+            <h4>Candidate Item</h4>
+            <div id=\"pairwise-candidate-text\"></div>
+            <div id=\"pairwise-candidate-label\" class=\"pairwise-label-row\"></div>
+            <div id=\"pairwise-candidate-score\" class=\"pairwise-score-box\"></div>
+          </div>
+          <div class=\"pairwise-col\">
+            <h4>Comparison Item</h4>
+            <div id=\"pairwise-comparison-text\"></div>
+            <div id=\"pairwise-comparison-label\" class=\"pairwise-label-row\"></div>
+            <div id=\"pairwise-comparison-score\" class=\"pairwise-score-box\"></div>
+          </div>
+        </div>
+        <div class=\"pairwise-outcome-grid\">
+          <div class=\"pairwise-outcome-cell\">
+            <div class=\"k\">Expected Top-Ranked Item</div>
+            <div id=\"pairwise-expected-top\"></div>
+          </div>
+          <div class=\"pairwise-outcome-cell\">
+            <div class=\"k\">Actual Top-Ranked Item</div>
+            <div id=\"pairwise-actual-top\"></div>
+          </div>
+        </div>
+      </div>
+
+      <details class=\"fold\" open>
+        <summary>Observational Evidence: Token Attribution</summary>
+        <div class=\"fold-body\">
+          <div class=\"small-note\" id=\"attr-context-note\"></div>
+          <div class=\"two-col\">
+            <div class=\"card\">
+              <h3 style=\"margin-top:0\">Query Token Attribution <span class=\"badge obs\">Observational</span></h3>
+              <div id=\"query-cloud\"></div>
+              <div class=\"two-col\" style=\"margin-top:8px\">
+                <div><strong>Helpful query tokens</strong><div id=\"q-pos\" class=\"table-wrap\"></div></div>
+                <div><strong>Harmful query tokens</strong><div id=\"q-neg\" class=\"table-wrap\"></div></div>
+              </div>
+            </div>
+            <div class=\"card\">
+              <h3 style=\"margin-top:0\">Item Token Attribution <span class=\"badge obs\">Observational</span></h3>
+              <div id=\"item-cloud\"></div>
+              <div class=\"two-col\" style=\"margin-top:8px\">
+                <div><strong>Helpful item tokens</strong><div id=\"i-pos\" class=\"table-wrap\"></div></div>
+                <div><strong>Harmful item tokens</strong><div id=\"i-neg\" class=\"table-wrap\"></div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </details>
       </div>
 
       <div class=\"card\">
         <h3 style=\"margin-top:0\">Causal Tests <span class=\"badge causal\">Causal</span></h3>
         <div class=\"explain\">
-          Counterfactual edits perturb one property at a time. Wrong-direction deltas indicate behavior that conflicts with expected relevance changes.
+          Each card answers one question: <strong>what changed</strong>, <strong>how the score reacted</strong>, and <strong>whether that reaction was expected</strong>. Start with failures and large score changes.
         </div>
         <div class=\"controls\">
           <label for=\"causal-edit-filter\">Edit type</label>
           <select id=\"causal-edit-filter\"></select>
         </div>
-        <div class=\"table-wrap\" id=\"causal-table\"></div>
+        <div id=\"causal-table\"></div>
       </div>
 
-      <div class=\"card\">
-        <h3 style=\"margin-top:0\">Attention Summary by Layer <span class=\"badge obs\">Observational</span></h3>
-        <div class=\"explain\">
-          First-principles read: this tells you where the model is focusing its computation.
-          If attention on query terms is weak when it should be high, or cross-segment attention is low, that points to retrieval-matching issues.
+      <div id=\"what-this-means\" class=\"story-card\"></div>
+
+      <details class=\"fold\">
+        <summary>Observational Evidence: Attention Summary by Layer</summary>
+        <div class=\"fold-body\">
+          <div class=\"explain\">
+            First-principles read: this tells you where the model is focusing its computation.
+            If attention on query terms is weak when it should be high, or cross-segment attention is low, that points to retrieval-matching issues.
+          </div>
+          <div id=\"attn-insights\" class=\"explain\" style=\"margin-top:8px;\"></div>
+          <div id=\"attn-bars\" class=\"attn-bars\"></div>
+          <div class=\"table-wrap\" id=\"attn-table\" style=\"margin-top:8px\"></div>
         </div>
-        <div id=\"attn-insights\" class=\"explain\" style=\"margin-top:8px;\"></div>
-        <div id=\"attn-bars\" class=\"attn-bars\"></div>
-        <div class=\"table-wrap\" id=\"attn-table\" style=\"margin-top:8px\"></div>
-      </div>
+      </details>
+    </div>
     </div>
   </div>
 
@@ -806,14 +1267,58 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
     function renderOverview() {{
       const o = data.overview || {{}};
       const cards = [
-        ["Total Pairs", o.total_pairs ?? 0],
-        ["Directional Groups", o.total_groups ?? 0],
-        ["Pass Rate", pct(o.pass_rate ?? 0)],
-        ["Failed Groups", o.failed_groups ?? 0],
+        {{
+          label: "Examples scored",
+          value: o.total_pairs ?? 0,
+          tip: "Total query-item examples scored in this dashboard run."
+        }},
+        {{
+          label: "Head-to-head tests",
+          value: o.total_groups ?? 0,
+          tip: "Each test compares items that should rank above/below each other for the same query."
+        }},
+        {{
+          label: "Ranking got it right",
+          value: pct(o.pass_rate ?? 0),
+          tip: "Share of head-to-head tests where the model put the expected-higher item above the expected-lower item."
+        }},
+        {{
+          label: "Ranking got it wrong",
+          value: o.failed_groups ?? 0,
+          tip: "Count of head-to-head tests where the model ordering disagreed with the expected ordering."
+        }},
       ];
-      document.getElementById("overview-cards").innerHTML = cards.map(([k,v]) =>
-        `<div class=\"meta\"><div class=\"k\">${{k}}</div><div class=\"v\">${{v}}</div></div>`
+      document.getElementById("overview-cards").innerHTML = cards.map(c =>
+        `<div class=\"meta\"><div class=\"k\" title=\"${{escAttr(c.tip)}}\">${{esc(c.label)}}</div><div class=\"v\">${{c.value}}</div></div>`
       ).join("");
+    }}
+
+    function renderTriageGuidance() {{
+      const host = document.getElementById("triage-guidance");
+      if (!host) return;
+      const cats = data.categories || [];
+      const worstCat = cats.length ? cats[0] : null;
+      const editRows = (data.failure_buckets?.by_edit_type || []).slice().sort((a, b) => Number(b.failure_rate || 0) - Number(a.failure_rate || 0));
+      const topEdit = editRows.length ? editRows[0] : null;
+      const topFailure = (data.top_examples || []).find(r => String(r.kind || "") === "most_concerning_failure");
+
+      const bullets = [];
+      if (topEdit && Number(topEdit.num_tests || 0) > 0) {{
+        bullets.push(`Highest-risk causal pattern: ${{String(topEdit.edit_type || "unknown")}} (${{pct(topEdit.failure_rate || 0)}} failure rate across ${{Number(topEdit.num_tests || 0)}} tests).`);
+      }} else {{
+        bullets.push("No labeled causal failure summary yet. You can still inspect score deltas, but not all edits are judged as right/wrong direction.");
+      }}
+      if (worstCat) {{
+        bullets.push(`Weakest category bucket right now: ${{String(worstCat.question_tag || "")}} (${{pct(worstCat.pass_rate || 0)}} pass rate).`);
+      }}
+      if (topFailure) {{
+        bullets.push(`Recommended starting case: \\"${{String(topFailure.query || "")}}\\" (${{String(topFailure.edit_type || "edit")}} counterfactual).`);
+      }}
+
+      host.innerHTML = `
+        <h3>So What / What Next</h3>
+        <ul>${{bullets.map(b => `<li>${{esc(b)}}</li>`).join("") || "<li>No summary guidance available yet.</li>"}}</ul>
+      `;
     }}
 
     function renderSeedOverview() {{
@@ -992,6 +1497,13 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
         num_tests: Number(r.num_tests || 0),
         sign_consistency: Number(r.sign_consistency || 0),
         failure_rate: Number(r.failure_rate || 0),
+        fail_order_rate: r.fail_order_rate == null ? null : Number(r.fail_order_rate),
+        fail_threshold_rate: r.fail_threshold_rate == null ? null : Number(r.fail_threshold_rate),
+        fail_both_rate: r.fail_both_rate == null ? null : Number(r.fail_both_rate),
+        fail_order_count: r.fail_order_count == null ? null : Number(r.fail_order_count),
+        fail_threshold_count: r.fail_threshold_count == null ? null : Number(r.fail_threshold_count),
+        fail_both_count: r.fail_both_count == null ? null : Number(r.fail_both_count),
+        summary_mode: String(r.summary_mode || ""),
       }}));
       const wrong = (fb.wrong_direction_examples || []).map(r => ({{
         probe_id: r.probe_id,
@@ -1009,15 +1521,36 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
         return;
       }}
 
-      const head = `<thead><tr><th>Edit Type</th><th>Tests</th><th>Sign Consistency</th><th>Failure Rate</th></tr></thead>`;
-      const body = byEdit.map(r => `
-        <tr class="clickable" data-edit-type="${{escAttr(r.edit_type)}}">
-          <td>${{esc(r.edit_type)}}</td>
-          <td>${{r.num_tests}}</td>
-          <td>${{pct(r.sign_consistency)}}</td>
-          <td>${{pct(r.failure_rate)}}</td>
-        </tr>
-      `).join("");
+      const hasBreakdown = byEdit.some(r => r.summary_mode === "v2_failure_breakdown");
+      const head = hasBreakdown
+        ? `<thead><tr><th>Edit Type</th><th>Tests</th><th>Pass</th><th>Fail (Any)</th><th>Order Fail</th><th>Threshold Fail</th><th>Both</th></tr></thead>`
+        : `<thead><tr><th>Edit Type</th><th>Tests</th><th>Sign Consistency</th><th>Failure Rate</th></tr></thead>`;
+      const body = byEdit.map(r => {{
+        if (hasBreakdown) {{
+          const orderText = r.fail_order_rate == null ? "-" : `${{pct(r.fail_order_rate)}} (${{r.fail_order_count ?? 0}})`;
+          const thresholdText = r.fail_threshold_rate == null ? "-" : `${{pct(r.fail_threshold_rate)}} (${{r.fail_threshold_count ?? 0}})`;
+          const bothText = r.fail_both_rate == null ? "-" : `${{pct(r.fail_both_rate)}} (${{r.fail_both_count ?? 0}})`;
+          return `
+            <tr class="clickable" data-edit-type="${{escAttr(r.edit_type)}}">
+              <td>${{esc(r.edit_type)}}</td>
+              <td>${{r.num_tests}}</td>
+              <td>${{pct(1 - r.failure_rate)}}</td>
+              <td>${{pct(r.failure_rate)}}</td>
+              <td>${{orderText}}</td>
+              <td>${{thresholdText}}</td>
+              <td>${{bothText}}</td>
+            </tr>
+          `;
+        }}
+        return `
+          <tr class="clickable" data-edit-type="${{escAttr(r.edit_type)}}">
+            <td>${{esc(r.edit_type)}}</td>
+            <td>${{r.num_tests}}</td>
+            <td>${{pct(r.sign_consistency)}}</td>
+            <td>${{pct(r.failure_rate)}}</td>
+          </tr>
+        `;
+      }}).join("");
       byEditHost.innerHTML = `<table>${{head}}<tbody>${{body}}</tbody></table>`;
       byEditHost.querySelectorAll("tr[data-edit-type]").forEach(tr => {{
         tr.addEventListener("click", () => {{
@@ -1034,12 +1567,30 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
       const fb = data.failure_buckets || {{}};
       const host = document.getElementById("failure-edit-drilldown");
       const label = document.getElementById("failure-drilldown-label");
+      const filterEl = document.getElementById("failure-result-filter");
       const rows = fb.edit_examples_by_type?.[editType] || [];
+      const filterOptions = failureDrilldownFilterOptions(rows);
+      if (filterEl) {{
+        filterEl.innerHTML = filterOptions.map(o => `<option value="${{escAttr(o.value)}}">${{esc(o.label)}}</option>`).join("");
+        if (!filterOptions.some(o => o.value === selectedFailureResultFilter)) {{
+          selectedFailureResultFilter = "all";
+        }}
+        filterEl.value = selectedFailureResultFilter;
+        filterEl.onchange = () => {{
+          selectedFailureResultFilter = filterEl.value || "all";
+          renderFailureEditDrilldown(selectedFailureEditType);
+        }};
+      }}
       label.textContent = editType
         ? `Edit type drilldown: ${{editType}}`
         : "Edit type drilldown: click a row above to see individual examples";
       if (!rows.length) {{
         host.innerHTML = "<p class='muted' style='padding:8px'>No examples for this edit type.</p>";
+        return;
+      }}
+      const shown = rows.filter(r => matchesFailureDrilldownFilter(r, selectedFailureResultFilter));
+      if (!shown.length) {{
+        host.innerHTML = "<p class='muted' style='padding:8px'>No examples match this result filter.</p>";
         return;
       }}
       const head = `
@@ -1049,15 +1600,15 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
             <th>Item</th>
             <th>Text Change</th>
             <th>Expected</th>
-            <th>Before</th>
-            <th>After</th>
-            <th>Delta</th>
+            <th>Before Prob</th>
+            <th>After Prob</th>
+            <th>Delta Margin</th>
             <th>Result</th>
           </tr>
         </thead>
       `;
-      const body = rows.map((r, idx) => {{
-        const verdict = causalVerdict(r.sign_consistent);
+      const body = shown.map((r, idx) => {{
+        const verdict = causalVerdict(r);
         return `
           <tr class="clickable ${{verdict.state === 'fail' ? 'warnrow' : ''}}" data-drill-idx="${{idx}}" data-edit-type="${{escAttr(editType)}}">
             <td>${{esc(r.query || "")}}</td>
@@ -1071,11 +1622,16 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
           </tr>
         `;
       }}).join("");
-      host.innerHTML = `<table>${{head}}<tbody>${{body}}</tbody></table>`;
+      host.innerHTML = `
+        <div class="small-note" style="padding:4px 8px 8px 8px">
+          Before/After are relevance probabilities (0-1). Delta Margin is the model margin/logit-space change, not probability delta.
+        </div>
+        <table>${{head}}<tbody>${{body}}</tbody></table>
+      `;
       host.querySelectorAll("tr[data-drill-idx]").forEach(tr => {{
         tr.addEventListener("click", () => {{
           const i = Number(tr.getAttribute("data-drill-idx") || 0);
-          const chosen = rows[i] || {{}};
+          const chosen = shown[i] || {{}};
           jumpToProbe(chosen);
         }});
       }});
@@ -1140,10 +1696,100 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
       `;
     }}
 
-    function causalVerdict(signConsistent) {{
+    function causalVerdict(rowOrSignConsistent) {{
+      if (rowOrSignConsistent && typeof rowOrSignConsistent === "object") {{
+        const v2 = String(rowOrSignConsistent.causal_result_v2 || "");
+        if (v2 === "pass") return {{ state: "pass", label: "as expected", pillClass: "ok" }};
+        if (v2 === "marginal") return {{ state: "marginal", label: "marginal", pillClass: "" }};
+        if (v2 === "ambiguous") return {{ state: "unknown", label: "ambiguous", pillClass: "" }};
+        if (v2.startsWith("fail")) {{
+          if (v2 === "fail_threshold") return {{ state: "fail", label: "threshold-fail", pillClass: "bad" }};
+          if (v2 === "fail_both") return {{ state: "fail", label: "order+threshold", pillClass: "bad" }};
+          return {{ state: "fail", label: "order-fail", pillClass: "bad" }};
+        }}
+      }}
+      const signConsistent = rowOrSignConsistent;
       if (signConsistent === true) return {{ state: "pass", label: "as expected", pillClass: "ok" }};
       if (signConsistent === false) return {{ state: "fail", label: "wrong-direction", pillClass: "bad" }};
       return {{ state: "unknown", label: "unjudged", pillClass: "" }};
+    }}
+
+    function shortLabelCode(lbl) {{
+      const x = String(lbl || "").toLowerCase();
+      if (x === "e") return "E";
+      if (x === "s") return "S";
+      if (x === "c") return "C";
+      if (x === "i") return "I";
+      if (x === "exact") return "E";
+      if (x === "substitute") return "S";
+      if (x === "complement") return "C";
+      if (x === "irrelevant") return "I";
+      return String(lbl || "");
+    }}
+
+    function normalizeEsciLabelClient(lbl) {{
+      const x = String(lbl || "").trim().toLowerCase();
+      if (x === "e" || x === "exact") return "Exact";
+      if (x === "s" || x === "substitute") return "Substitute";
+      if (x === "c" || x === "complement") return "Complement";
+      if (x === "i" || x === "irrelevant") return "Irrelevant";
+      return String(lbl || "");
+    }}
+
+    function normalizePairwiseExpectation(raw) {{
+      const s = String(raw || "").trim().toLowerCase();
+      if (!s) return "unknown";
+      if (s.includes("higher")) return "higher";
+      if (s.includes("lower")) return "lower";
+      return "unknown";
+    }}
+
+    function normalizeDeltaExpectation(raw) {{
+      const s = String(raw || "").trim().toLowerCase();
+      if (!s) return "unknown";
+      if (s.includes("down") || s.includes("decrease") || s.includes("lower")) return "down";
+      if (s.includes("up") || s.includes("increase") || s.includes("higher")) return "up";
+      if (s.includes("neutral") || s.includes("same") || s.includes("no_change")) return "neutral";
+      return String(raw || "unknown");
+    }}
+
+    function pairRelationBadge(text, kind="neutral") {{
+      return `<span class="pair-rel-badge ${{kind}}">${{esc(text)}}</span>`;
+    }}
+
+    function truncateText(s, n=80) {{
+      const t = String(s || "");
+      return t.length > n ? `${{t.slice(0, n-1)}}…` : t;
+    }}
+
+    function esciLabelExplanation(lbl) {{
+      const x = String(lbl || "");
+      if (x === "Exact") return "Exact (E) means the item directly matches the query intent.";
+      if (x === "Substitute") return "Substitute (S) means the item is a reasonable alternative, but not the exact requested item.";
+      if (x === "Complement") return "Complement (C) means the item is related and often used with the requested item.";
+      if (x === "Irrelevant") return "Irrelevant (I) means the item does not satisfy the query intent.";
+      return "Ground-truth label description unavailable.";
+    }}
+
+    function gtBadgeHtml(labelRaw) {{
+      const label = normalizeEsciLabelClient(labelRaw) || String(labelRaw || "");
+      const code = shortLabelCode(labelRaw || label);
+      const klass = ["Exact","Substitute","Complement","Irrelevant"].includes(label) ? `gt-${{label}}` : "";
+      const display = label ? `${{label}}${{code && code !== label ? ` (${{code}})` : ""}}` : "-";
+      return `<span class="gt-pill ${{klass}}">${{esc(display)}}</span>`;
+    }}
+
+    function scoreMiniCardHtml(title, score) {{
+      const s = Number(score ?? 0);
+      return `
+        <div class="mini-score-card">
+          <div class="mini-score-head">
+            <div class="mini-score-label">${{esc(title)}}</div>
+            <div class="mini-score-value">${{s.toFixed(4)}}</div>
+          </div>
+          <div class="mini-score-track"><div class="mini-score-fill" style="width:${{Math.max(0, Math.min(100, s * 100)).toFixed(1)}}%"></div></div>
+        </div>
+      `;
     }}
 
     function renderTextChange(originalText, editedText) {{
@@ -1172,18 +1818,26 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
         host.innerHTML = "<strong>What this means:</strong> No causal test rows for this example yet.";
         return;
       }}
-      const labeled = rows.filter(r => r.sign_consistent === true || r.sign_consistent === false);
+      const hasV2 = rows.some(r => String(r.causal_result_v2 || "").length > 0);
+      const labeled = hasV2
+        ? rows.filter(r => String(r.causal_result_v2 || "") !== "" && String(r.causal_result_v2 || "") !== "ambiguous")
+        : rows.filter(r => r.sign_consistent === true || r.sign_consistent === false);
       if (!labeled.length) {{
         host.innerHTML = "<strong>What this means:</strong> Score changes are shown, but expected-direction labels are disabled. Regenerate counterfactuals with an OpenAI API key to mark edits as expected vs wrong-direction.";
         return;
       }}
-      const wrong = labeled.filter(r => r.sign_consistent === false);
+      const wrong = hasV2
+        ? labeled.filter(r => String(r.causal_result_v2 || "").startsWith("fail"))
+        : labeled.filter(r => r.sign_consistent === false);
       const best = labeled.slice().sort((a,b) => Number(b.abs_delta_margin || 0) - Number(a.abs_delta_margin || 0))[0];
       if (wrong.length) {{
         const worst = wrong.slice().sort((a,b) => Number(b.abs_delta_margin || 0) - Number(a.abs_delta_margin || 0))[0];
+        const expectedText = worst.expected_label_transition
+          ? `${{worst.expected_label_transition}} (${{String(worst.expected_delta_direction || "unknown")}})`
+          : String(worst.expected_delta_direction || "unknown");
         host.innerHTML = `
           <strong>What this means:</strong> This example has a concern. After a <strong>${{esc(worst.edit_type)}}</strong> change, the model moved in the wrong direction.<br>
-          <span class="muted">Expected: ${{esc(worst.expected_delta_direction)}} | Actual change: ${{Number(worst.delta_margin || 0).toFixed(3)}} margin.</span>
+          <span class="muted">Expected: ${{esc(expectedText)}} | Actual change: ${{Number(worst.delta_margin || 0).toFixed(3)}} margin.</span>
         `;
       }} else {{
         host.innerHTML = `
@@ -1197,11 +1851,14 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
       const rows = data.categories || [];
       const head = `<thead><tr><th>Category</th><th>Queries</th><th>Pairs</th><th>Groups</th><th>Pass Rate</th></tr></thead>`;
       const body = rows.map(r =>
-        `<tr class=\"clickable\" data-cat=\"${{esc(r.question_tag)}}\"><td>${{esc(r.question_tag)}}</td><td>${{r.num_queries}}</td><td>${{r.num_pairs}}</td><td>${{r.num_groups}}</td><td>${{passPill(r.pass_rate)}}</td></tr>`
+        `<tr class=\"clickable ${{selectedCategory === r.question_tag ? "selected-row" : ""}}\" data-cat=\"${{esc(r.question_tag)}}\"><td>${{esc(r.question_tag)}}</td><td>${{r.num_queries}}</td><td>${{r.num_pairs}}</td><td>${{r.num_groups}}</td><td>${{passPill(r.pass_rate)}}</td></tr>`
       ).join("");
-      const tbl = document.getElementById("categories-table");
-      tbl.innerHTML = head + `<tbody>${{body}}</tbody>`;
-      tbl.querySelectorAll("tr[data-cat]").forEach(tr => tr.addEventListener("click", () => selectCategory(tr.dataset.cat)));
+      ["categories-table", "categories-table-workspace"].forEach(id => {{
+        const tbl = document.getElementById(id);
+        if (!tbl) return;
+        tbl.innerHTML = head + `<tbody>${{body}}</tbody>`;
+        tbl.querySelectorAll("tr[data-cat]").forEach(tr => tr.addEventListener("click", () => selectCategory(tr.dataset.cat)));
+      }});
     }}
 
     function renderSimpleTable(rows) {{
@@ -1253,11 +1910,51 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
     let selectedProbe = null;
     let selectedCausalFilter = "all";
     let selectedFailureEditType = "";
-    let beginnerMode = true;
+    let selectedFailureResultFilter = "all";
+    function failureDrilldownFilterOptions(rows) {{
+      const hasV2 = (rows || []).some(r => String(r.causal_result_v2 || "") !== "");
+      if (hasV2) {{
+        return [
+          {{ value: "all", label: "All results" }},
+          {{ value: "fail_any", label: "Failures only" }},
+          {{ value: "fail_order", label: "Order failures" }},
+          {{ value: "fail_threshold", label: "Threshold failures" }},
+          {{ value: "fail_both", label: "Both (order+threshold)" }},
+          {{ value: "marginal", label: "Marginal" }},
+          {{ value: "pass", label: "Pass" }},
+          {{ value: "ambiguous", label: "Ambiguous" }},
+        ];
+      }}
+      return [
+        {{ value: "all", label: "All results" }},
+        {{ value: "fail_any", label: "Failures only" }},
+        {{ value: "pass", label: "Pass" }},
+        {{ value: "unjudged", label: "Unjudged" }},
+      ];
+    }}
+
+    function matchesFailureDrilldownFilter(row, mode) {{
+      if (!mode || mode === "all") return true;
+      const v2 = String(row.causal_result_v2 || "");
+      if (v2) {{
+        if (mode === "fail_any") return v2.startsWith("fail");
+        if (mode === "fail_order") return v2 === "fail_order" || v2 === "fail_both";
+        if (mode === "fail_threshold") return v2 === "fail_threshold" || v2 === "fail_both";
+        if (mode === "fail_both") return v2 === "fail_both";
+        if (mode === "marginal") return v2 === "marginal";
+        if (mode === "pass") return v2 === "pass";
+        if (mode === "ambiguous") return v2 === "ambiguous";
+        return true;
+      }}
+      if (mode === "fail_any") return row.sign_consistent === false;
+      if (mode === "pass") return row.sign_consistent === true;
+      if (mode === "unjudged") return !(row.sign_consistent === true || row.sign_consistent === false);
+      return true;
+    }}
 
     function renderCausalTests(probeId) {{
       const filter = document.getElementById("causal-edit-filter");
-      const table = document.getElementById("causal-table");
+      const host = document.getElementById("causal-table");
       const rows = data.causal_by_probe?.[probeId] || [];
       const editTypes = Array.from(new Set(rows.map(r => String(r.edit_type || "")).filter(Boolean))).sort();
       const opts = ["all", ...editTypes];
@@ -1270,71 +1967,62 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
         .sort((a,b) => Number(b.abs_delta_margin || 0) - Number(a.abs_delta_margin || 0));
 
       if (!shown.length) {{
-        table.innerHTML = "<p class='muted' style='padding:8px'>No causal rows available for this probe.</p>";
+        host.innerHTML = "<p class='muted' style='padding:8px'>No causal rows available for this probe.</p>";
         return;
       }}
-
-      const head = beginnerMode
-        ? `
-          <thead>
-            <tr>
-              <th>Edit Type</th>
-              <th>Expected Reaction</th>
-              <th>Before vs After Score</th>
-              <th>Model Reaction</th>
-              <th>Result</th>
-            </tr>
-          </thead>
-        `
-        : `
-          <thead>
-            <tr>
-              <th>Edit Type</th>
-              <th>Expected</th>
-              <th>Original Margin</th>
-              <th>Edited Margin</th>
-              <th>Delta Margin</th>
-              <th>Delta Prob</th>
-              <th>Result</th>
-            </tr>
-          </thead>
-        `;
-      const body = shown.map(r => {{
-        const verdict = causalVerdict(r.sign_consistent);
-        if (beginnerMode) {{
-          const dm = Number(r.delta_margin || 0);
-          const reaction = dm > 0 ? "Score went up" : (dm < 0 ? "Score went down" : "No change");
-          return `
-            <tr class="${{verdict.state === 'fail' ? 'warnrow' : ''}}">
-              <td>${{esc(r.edit_type)}}</td>
-              <td>${{esc(r.expected_delta_direction || 'unjudged')}}</td>
-              <td>${{scoreCompareCell(r.original_prob, r.edited_prob)}}</td>
-              <td>${{reaction}} (${{dm.toFixed(3)}})</td>
-              <td><span class="pill ${{verdict.pillClass}}">${{verdict.label}}</span></td>
-            </tr>
-          `;
-        }}
+      const cards = shown.map(r => {{
+        const verdict = causalVerdict(r);
+        const dm = Number(r.delta_margin || 0);
+        const dp = Number(r.delta_prob || 0);
+        const actual = dm > 0 ? "up" : (dm < 0 ? "down" : "neutral");
+        const expected = normalizeDeltaExpectation(r.expected_delta_direction);
+        const directionText = expected === "unknown"
+          ? `Model reaction: ${{actual}}`
+          : `Expected ${{expected}}; model went ${{actual}}`;
+        const reasonBits = [];
+        if (r.causal_result_reason) reasonBits.push(String(r.causal_result_reason));
+        if (r.expected_label_transition) reasonBits.push(`Expected label change: ${{String(r.expected_label_transition)}}`);
         return `
-          <tr class="${{verdict.state === 'fail' ? 'warnrow' : ''}}">
-            <td>${{esc(r.edit_type)}}</td>
-            <td>${{esc(r.expected_delta_direction || 'unjudged')}}</td>
-            <td>${{Number(r.original_margin || 0).toFixed(4)}}</td>
-            <td>${{Number(r.edited_margin || 0).toFixed(4)}}</td>
-            <td>${{Number(r.delta_margin || 0).toFixed(4)}}</td>
-            <td>${{Number(r.delta_prob || 0).toFixed(4)}}</td>
-            <td><span class="pill ${{verdict.pillClass}}">${{verdict.label}}</span></td>
-          </tr>
+          <div class="causal-case ${{verdict.state === 'fail' ? 'fail' : (verdict.state === 'pass' ? 'pass' : '')}}">
+            <div class="causal-case-head">
+              <div class="causal-case-title">
+                <span class="pill causal-edit-pill">${{esc(r.edit_type || "edit")}}</span>
+                <span class="pill ${{verdict.pillClass}}">${{verdict.label}}</span>
+              </div>
+              <div class="small-note"><strong>${{esc(directionText)}}</strong></div>
+            </div>
+            <div class="causal-case-body">
+              <div class="causal-case-change">
+                <div class="small-note" style="margin-bottom:6px"><strong>What changed</strong></div>
+                ${{renderTextChange(r.original_text, r.edited_text)}}
+              </div>
+              <div class="causal-case-score">
+                <div class="small-note" style="margin-bottom:6px"><strong>Score reaction</strong></div>
+                ${{scoreCompareCell(r.original_prob, r.edited_prob)}}
+                <div class="causal-case-meta">
+                  Δmargin: ${{dm.toFixed(3)}} <span class="inline-sep">|</span> Δprob: ${{dp.toFixed(3)}}
+                </div>
+              </div>
+            </div>
+            ${{reasonBits.length ? `<div class="causal-case-meta">${{esc(reasonBits.join(" • "))}}</div>` : ""}}
+          </div>
         `;
       }}).join("");
-      table.innerHTML = `<table>${{head}}<tbody>${{body}}</tbody></table>`;
+      host.innerHTML = `
+        <div class="small-note" style="margin-bottom:8px">
+          Showing ${{shown.length}} causal tests for this pair, sorted by largest score change first.
+        </div>
+        <div class="causal-stack">${{cards}}</div>
+      `;
     }}
 
     function selectCategory(cat) {{
       selectedCategory = cat;
+      renderCategories();
       document.getElementById("selected-category").innerHTML = `<strong>Category:</strong> ${{esc(cat)}}`;
       const qs = data.queries?.[cat] || [];
       const head = `<thead><tr><th>Query</th><th>Pairs</th><th>Groups</th><th>Pass Rate</th></tr></thead>`;
-      const body = qs.map(q => `<tr class=\"clickable\" data-query=\"${{esc(q.query)}}\"><td>${{esc(q.query)}}</td><td>${{q.num_pairs}}</td><td>${{q.num_groups}}</td><td>${{passPill(q.pass_rate)}}</td></tr>`).join("");
+      const body = qs.map(q => `<tr class=\"clickable ${{selectedQuery === q.query ? "selected-row" : ""}}\" data-query=\"${{esc(q.query)}}\"><td>${{esc(q.query)}}</td><td>${{q.num_pairs}}</td><td>${{q.num_groups}}</td><td>${{passPill(q.pass_rate)}}</td></tr>`).join("");
       const tbl = document.getElementById("queries-table");
       tbl.innerHTML = head + `<tbody>${{body}}</tbody>`;
       tbl.querySelectorAll("tr[data-query]").forEach(tr => tr.addEventListener("click", () => selectQuery(tr.dataset.query)));
@@ -1346,10 +2034,13 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
     function selectQuery(query) {{
       selectedQuery = query;
       document.getElementById("selected-query").innerHTML = `<strong>Query:</strong> ${{esc(query)}}`;
+      document.querySelectorAll("#queries-table tr[data-query]").forEach(tr => {{
+        tr.classList.toggle("selected-row", (tr.dataset.query || "") === String(query));
+      }});
       const items = data.items_by_query?.[query] || [];
       const head = `<thead><tr><th>Item</th><th>GT Label</th><th>GT Score</th><th>Model Score</th><th>Expected</th><th>Model Pred</th><th>Group Result</th></tr></thead>`;
       const body = items.map(it => `
-        <tr class=\"clickable\" data-probe=\"${{esc(it.probe_id)}}\">\
+        <tr class=\"clickable ${{selectedProbe === it.probe_id ? 'selected-row' : ''}}\" data-probe=\"${{esc(it.probe_id)}}\">\
           <td>${{esc(it.item_text)}}</td>\
           <td>${{esc(it.esci_label)}}</td>\
           <td>${{Number(it.relevance_score).toFixed(0)}}</td>\
@@ -1368,11 +2059,28 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
     }}
 
     function clearDetail() {{
-      ["meta-label","meta-rel","meta-model","meta-exp"].forEach(id => document.getElementById(id).textContent = "-");
+      document.getElementById("meta-label").innerHTML = "-";
+      document.getElementById("meta-rel").textContent = "-";
+      document.getElementById("meta-model").textContent = "-";
+      document.getElementById("meta-model-bar").style.width = "0%";
+      document.getElementById("meta-model-note").textContent = "0 to 1 score scale";
+      document.getElementById("meta-model-status").innerHTML = "";
+      document.getElementById("meta-model-check").innerHTML = "";
+      document.getElementById("pairwise-status").innerHTML = "";
+      document.getElementById("pairwise-query").innerHTML = "";
+      document.getElementById("pairwise-candidate-text").innerHTML = "";
+      document.getElementById("pairwise-comparison-text").innerHTML = "";
+      document.getElementById("pairwise-candidate-label").innerHTML = "";
+      document.getElementById("pairwise-comparison-label").innerHTML = "";
+      document.getElementById("pairwise-candidate-score").innerHTML = "";
+      document.getElementById("pairwise-comparison-score").innerHTML = "";
+      document.getElementById("pairwise-expected-top").innerHTML = "";
+      document.getElementById("pairwise-actual-top").innerHTML = "";
       document.getElementById("tag-provenance").textContent = "";
       document.getElementById("pair-query").innerHTML = "";
       document.getElementById("pair-item").innerHTML = "";
       document.getElementById("what-this-means").innerHTML = "";
+      document.getElementById("attr-context-note").textContent = "";
       document.getElementById("query-cloud").innerHTML = "";
       document.getElementById("item-cloud").innerHTML = "";
       document.getElementById("q-pos").innerHTML = "";
@@ -1454,23 +2162,107 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
 
     function selectProbe(probeId) {{
       selectedProbe = probeId;
+      document.querySelectorAll("#items-table tr[data-probe]").forEach(tr => {{
+        tr.classList.toggle("selected-row", (tr.dataset.probe || "") === String(probeId));
+      }});
       const item = (data.items_by_query?.[selectedQuery] || []).find(x => x.probe_id === probeId) || {{}};
+      const allItems = data.items_by_query?.[selectedQuery] || [];
+      const sameGroup = allItems.filter(x =>
+        String(x.pair_group_id || "") === String(item.pair_group_id || "") &&
+        String(x.probe_id || "") !== String(probeId || "")
+      );
+      const counterpart = sameGroup.length ? sameGroup[0] : null;
+      const gtLabelRaw = String(item.esci_label || "-");
+      const gtLabel = normalizeEsciLabelClient(gtLabelRaw || "-") || gtLabelRaw;
+      const gtClass = ["Exact","Substitute","Complement","Irrelevant"].includes(gtLabel) ? `gt-${{gtLabel}}` : "";
+      const gtCode = shortLabelCode(gtLabelRaw || gtLabel);
+      const gtDisplay = gtLabel && gtLabel !== "-" ? `${{gtLabel}}${{gtCode && gtCode !== gtLabel ? ` (${{gtCode}})` : ""}}` : "-";
+      document.getElementById("meta-label").innerHTML = `<span class="gt-pill ${{gtClass}}">${{esc(gtDisplay)}}</span>`;
+      document.getElementById("meta-rel").textContent = item.relevance_score != null
+        ? `${{esciLabelExplanation(gtLabel)}} Ground-truth ordinal score: ${{String(item.relevance_score)}} on a 0-3 scale (not the same units as model score).`
+        : "Ground-truth ordinal score unavailable";
 
-      document.getElementById("meta-label").textContent = esc(item.esci_label || "-");
-      document.getElementById("meta-rel").textContent = item.relevance_score != null ? String(item.relevance_score) : "-";
-      document.getElementById("meta-model").textContent = item.model_score != null ? Number(item.model_score).toFixed(4) : "-";
-      document.getElementById("meta-exp").textContent = esc(item.expected_direction || "-");
+      const modelScore = Number(item.model_score ?? 0);
+      document.getElementById("meta-model").textContent = item.model_score != null ? modelScore.toFixed(4) : "-";
+      document.getElementById("meta-model-bar").style.width = `${{Math.max(0, Math.min(100, modelScore * 100)).toFixed(1)}}%`;
+      document.getElementById("meta-model-note").textContent = "Continuous model score on a 0-1 scale (higher means more relevant)";
+      const exactThreshold = Number(data.absolute?.exact_threshold ?? 0.9);
+      const isExact = gtLabel === "Exact";
+      const absPass = isExact ? (modelScore >= exactThreshold) : (modelScore < exactThreshold);
+      const absRule = isExact
+        ? `Because GT is Exact (E), this score should usually be >= ${{exactThreshold.toFixed(2)}}`
+        : `Because GT is not Exact (E), this score should usually be < ${{exactThreshold.toFixed(2)}}`;
+      document.getElementById("meta-model-status").innerHTML =
+        `<span class="check-chip ${{absPass ? "check-pass" : "check-fail"}}">${{absPass ? "passes score check" : "fails score check"}}</span>`;
+      document.getElementById("meta-model-check").innerHTML = `<strong>Rule:</strong> ${{esc(absRule)}}`;
+
+      const exp = String(item.expected_direction || "-");
+      const pred = String(item.model_pred_direction || "");
+      const pairExpectation = normalizePairwiseExpectation(exp);
+      const expHigher = pairExpectation === "higher";
+      const expLower = pairExpectation === "lower";
+      const expectedTopText = expHigher
+        ? "Candidate item"
+        : (expLower ? "Comparison item" : "Unknown");
+
+      document.getElementById("pairwise-query").innerHTML = `
+        <div class="k">Query</div>
+        <div class="vtext">${{esc(item.query || selectedQuery || "")}}</div>
+      `;
+      document.getElementById("pairwise-candidate-text").innerHTML = `<div class="pair-item-text">${{esc(item.item_text || "")}}</div>`;
+      document.getElementById("pairwise-candidate-label").innerHTML = gtBadgeHtml(gtLabelRaw || gtLabel);
+      document.getElementById("pairwise-candidate-score").innerHTML = scoreMiniCardHtml("Model output score", modelScore);
+      if (counterpart) {{
+        const otherScore = Number(counterpart.model_score ?? 0);
+        const actualDirection = modelScore > otherScore ? "higher" : (modelScore < otherScore ? "lower" : "neutral");
+        const pairOutcome = item.group_passed === true ? "pair check passed" : (item.group_passed === false ? "pair check failed" : "pair check unknown");
+        const otherLabelRaw = String(counterpart.esci_label || "");
+        const otherLabel = normalizeEsciLabelClient(otherLabelRaw) || otherLabelRaw;
+        const actualTopText = actualDirection === "higher"
+          ? "Candidate item"
+          : (actualDirection === "lower" ? "Comparison item" : "Tie");
+        document.getElementById("pairwise-status").innerHTML =
+          `<span class="check-chip ${{item.group_passed ? "check-pass" : "check-fail"}}">${{esc(pairOutcome)}}</span>`;
+        document.getElementById("pairwise-comparison-text").innerHTML = `<div class="pair-item-text">${{esc(counterpart.item_text || "")}}</div>`;
+        document.getElementById("pairwise-comparison-label").innerHTML = gtBadgeHtml(otherLabelRaw || otherLabel);
+        document.getElementById("pairwise-comparison-score").innerHTML = scoreMiniCardHtml("Model output score", otherScore);
+        document.getElementById("pairwise-expected-top").innerHTML = pairRelationBadge(expectedTopText, "neutral");
+        document.getElementById("pairwise-actual-top").innerHTML = pairRelationBadge(
+          actualTopText,
+          actualDirection === "neutral" ? "neutral" : (item.group_passed ? "good" : "bad")
+        );
+      }} else {{
+        document.getElementById("pairwise-status").innerHTML = "";
+        document.getElementById("pairwise-comparison-text").innerHTML = `<div class="pair-item-text">Unavailable</div>`;
+        document.getElementById("pairwise-comparison-label").innerHTML = "";
+        document.getElementById("pairwise-comparison-score").innerHTML = "";
+        document.getElementById("pairwise-expected-top").innerHTML = pairRelationBadge(expectedTopText, "neutral");
+        document.getElementById("pairwise-actual-top").innerHTML =
+          pred === "predicted_higher"
+            ? pairRelationBadge("Candidate item", "neutral")
+            : (pred === "predicted_lower" ? pairRelationBadge("Comparison item", "neutral") : pairRelationBadge("Unknown", "neutral"));
+      }}
       document.getElementById("tag-provenance").textContent =
         (item.tag_reason || item.tag_confidence)
           ? `Tag provenance: tag=${{item.question_tag || "-"}}, reason=${{item.tag_reason || "-"}}, confidence=${{item.tag_confidence || "-"}}`
           : "";
-      document.getElementById("pair-query").innerHTML = `<b>Query:</b> ${{esc(item.query || selectedQuery || "")}}`;
-      document.getElementById("pair-item").innerHTML = `<b>Item:</b> ${{esc(item.item_text || "")}}`;
+      document.getElementById("pair-query").innerHTML = `
+        <div class="k">Query</div>
+        <div class="vtext">${{esc(item.query || selectedQuery || "")}}</div>
+      `;
+      document.getElementById("pair-item").innerHTML = `
+        <div class="k">Candidate Item</div>
+        <div class="vtext">${{esc(item.item_text || "")}}</div>
+      `;
 
       const trows = data.attrs_by_probe?.[probeId] || [];
       const toks = normalizeTokens(trows);
       document.getElementById("query-cloud").innerHTML = cloud(toks, "query");
       document.getElementById("item-cloud").innerHTML = cloud(toks, "item");
+      document.getElementById("attr-context-note").textContent =
+        item.model_score != null
+          ? `These token attributions explain the original model score for this exact pair: ${{Number(item.model_score).toFixed(4)}}.`
+          : "These token attributions explain the original model score for this exact pair.";
       document.getElementById("q-pos").innerHTML = renderSimpleTable(topTokens(toks, "query", true));
       document.getElementById("q-neg").innerHTML = renderSimpleTable(topTokens(toks, "query", false));
       document.getElementById("i-pos").innerHTML = renderSimpleTable(topTokens(toks, "item", true));
@@ -1492,14 +2284,11 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
     renderOverview();
     renderSeedOverview();
     renderCausalLabelingBanner();
+    renderTriageGuidance();
     renderTopExamples();
     renderAbsolute();
     renderFailureBuckets();
-    renderCategories();
-    document.getElementById("mode-toggle").addEventListener("change", (e) => {{
-      beginnerMode = Boolean(e.target.checked);
-      if (selectedProbe) renderCausalTests(selectedProbe);
-    }});
+      renderCategories();
     document.getElementById("causal-edit-filter").addEventListener("change", (e) => {{
       selectedCausalFilter = e.target.value || "all";
       if (selectedProbe) renderCausalTests(selectedProbe);
