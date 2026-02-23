@@ -15,7 +15,7 @@ Default model:
 - Ranking and calibration checks
 - Token attribution + attention summaries (observational evidence)
 - Counterfactual edit tests (causal evidence)
-- An interactive dashboard with beginner mode and drilldowns
+- An interactive progressive-disclosure dashboard with drilldowns
 
 ## Quickstart
 ```bash
@@ -39,33 +39,37 @@ Open:
 - `outputs/dashboard.html`
 
 ## Dashboard Walkthrough
-1. Start at **Top 3 Examples** for quick intuition.
-2. Use **Failure Buckets Summary** to see which edit types fail most (including order-vs-threshold failure breakdowns when causal v2 labels are present).
-3. Click an edit type to drill into **individual query/item examples**, then use the drilldown **Result filter** to isolate failure cases.
-4. Click an example row to jump to full detail.
-5. In **Causal Tests**, compare before/after score changes and check whether reaction matched the expected ESCI label transition.
-6. Use **Beginner Mode** for plain-language interpretation, or turn it off for full numeric detail.
+1. Start at **Health Snapshot** to get the overall picture (ranking behavior + score sanity checks).
+2. Use **Focus Finder** to see which edit types and probe buckets fail most.
+3. Click a failure-bucket row or jump-start example to move into the **Drilldown Workspace**.
+4. In **Selected Pair: Behavior Readout**, orient on the query/item, ground-truth label, and model score.
+5. Use the separate **Pairwise Check** card to compare candidate vs comparison item (labels, scores, expected top item, actual top item).
+6. Read **Token Attribution** (observational) for the selected pair, then inspect **Causal Tests** (causal) for stronger evidence.
 
 ## Screenshots
-Overview:
+Top-level overview (goal + health snapshot):
 
 ![Dashboard overview](docs/images/dashboard_overview.png)
 
-Handcrafted seed set overview (balanced sanity-check examples):
+Seed-set context (collapsed section expanded):
 
 ![Dashboard seed overview](docs/images/dashboard_seed_overview.png)
 
-Category/query/pair drilldown:
+Focus finder (failure buckets + weakest categories):
+
+![Dashboard causal summary](docs/images/dashboard_causal_summary.png)
+
+Selected-pair drilldown (query/item + GT label + model output):
 
 ![Dashboard drilldown](docs/images/dashboard_drilldown.png)
 
-Observational diagnostics (token attribution + attention):
+Pairwise check (candidate vs comparison item):
+
+![Dashboard pairwise check](docs/images/dashboard_pairwise_check.png)
+
+Observational diagnostics (token attribution for the selected pair):
 
 ![Dashboard diagnostics](docs/images/dashboard_diagnostics.png)
-
-Causal summary (failure buckets + edit-type outcomes):
-
-![Dashboard causal summary](docs/images/dashboard_causal_summary.png)
 
 Causal drilldown (per-example score changes + text edits):
 
