@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,7 +13,15 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from attribution import token_gradient_attribution
-from causal import CausalLabel, generate_counterfactual_results
+from causal import (
+    CausalLabel,
+    OpenAICausalLabeler,
+    _causal_labeler_prompt_version,
+    _compute_threshold_transition_status,
+    _compute_threshold_check_regression_aware,
+    _resolve_expected_direction,
+    generate_counterfactual_results,
+)
 from inference import BaseCrossEncoderAdapter, HFCrossEncoderAdapter, ModelBundle, score_pairs
 from probes import tag_question
 
@@ -244,6 +253,53 @@ class Phase2ATests(unittest.TestCase):
         self.assertGreater(len(out), 0)
         self.assertTrue(out["expected_delta_direction"].isna().all())
         self.assertTrue(out["sign_consistent"].isna().all())
+
+    def test_same_esci_transition_does_not_force_neutral_direction(self):
+        self.assertEqual(_resolve_expected_direction("I", "I", "down"), "down")
+        self.assertEqual(_resolve_expected_direction("I", "I", "up"), "up")
+        self.assertEqual(_resolve_expected_direction("I", "I", "neutral"), "neutral")
+
+    def test_cross_esci_transition_enforces_ordinal_direction(self):
+        # Even if the judge emits an inconsistent direction, the ESCI transition wins.
+        self.assertEqual(_resolve_expected_direction("E", "I", "up"), "down")
+        self.assertEqual(_resolve_expected_direction("I", "S", "down"), "up")
+
+    def test_threshold_check_marks_inherited_fail_for_same_exactness_bucket(self):
+        # Original and edited are both expected non-E, and both violate the E/non-E threshold.
+        self.assertEqual(
+            _compute_threshold_check_regression_aware("I", "I", original_prob=0.999, edited_prob=0.973),
+            "inherited_fail",
+        )
+        # If the edit newly introduces the failure, it should still be a true fail.
+        self.assertEqual(
+            _compute_threshold_check_regression_aware("I", "I", original_prob=0.381, edited_prob=0.982),
+            "fail",
+        )
+
+    def test_threshold_transition_status_decomposes_baseline_vs_edit(self):
+        self.assertEqual(
+            _compute_threshold_transition_status("I", "I", original_prob=0.999, edited_prob=0.973),
+            ("fail", "fail", "inherited_fail"),
+        )
+        self.assertEqual(
+            _compute_threshold_transition_status("E", "E", original_prob=0.95, edited_prob=0.96),
+            ("pass", "pass", "unchanged_pass"),
+        )
+        self.assertEqual(
+            _compute_threshold_transition_status("I", "I", original_prob=0.1, edited_prob=0.98),
+            ("pass", "fail", "introduced_fail"),
+        )
+        self.assertEqual(
+            _compute_threshold_transition_status("E", "E", original_prob=0.2, edited_prob=0.95),
+            ("fail", "pass", "resolved_fail"),
+        )
+
+    def test_openai_causal_labeler_prompt_version_is_derived_from_prompt_contract(self):
+        with tempfile.TemporaryDirectory() as td:
+            cache_path = Path(td) / "causal_cache.jsonl"
+            labeler = OpenAICausalLabeler(api_key="test-key", cache_path=cache_path)
+        self.assertEqual(labeler.prompt_version, _causal_labeler_prompt_version())
+        self.assertTrue(labeler.prompt_version.startswith("causal_labeler_contract_"))
 
     def test_tagging_allows_unclassified(self):
         decision = tag_question("random search phrase", "generic product listing")

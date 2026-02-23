@@ -78,7 +78,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    openai_api_key = os.environ.get(args.openai_api_key_env)
+    raw_openai_api_key = os.environ.get(args.openai_api_key_env)
+    openai_api_key = (raw_openai_api_key.strip() if raw_openai_api_key is not None else None) or None
+    openai_env_present = args.openai_api_key_env in os.environ
     if args.prompt_openai_api_key and not openai_api_key:
         openai_api_key = getpass.getpass("OpenAI API key (input hidden, optional): ").strip() or None
     if openai_api_key:
@@ -86,6 +88,17 @@ def main() -> None:
         print(f"OpenAI causal labeling parallelism: max_workers={max(int(args.openai_label_workers), 1)}")
     else:
         print("OpenAI causal labeling: disabled (no API key provided). Causal labels/result pass-fail columns will be left unlabeled.")
+        if openai_env_present:
+            print(
+                f"Note: {args.openai_api_key_env} is set but empty/whitespace. "
+                "If you are loading from macOS Keychain via command substitution, "
+                "the `security` lookup may have failed and expanded to an empty string."
+            )
+        else:
+            print(
+                f"Hint: set {args.openai_api_key_env} in the environment, or pass --prompt-openai-api-key "
+                "to enter it interactively."
+            )
     resolved_edit_generator = args.edit_generator
     if resolved_edit_generator == "auto":
         resolved_edit_generator = "openai" if openai_api_key else "heuristic"
@@ -98,6 +111,11 @@ def main() -> None:
     else:
         if args.edit_generator == "auto":
             print("Counterfactual edit generation: heuristic rules (auto fallback; no API key)")
+            if not openai_api_key:
+                print(
+                    "Hint: if using `OPENAI_API_KEY=\"$(security find-generic-password ...)\"`, "
+                    "run the `security` command by itself first to confirm it returns a non-empty value."
+                )
         else:
             print("Counterfactual edit generation: heuristic rules")
 

@@ -78,6 +78,48 @@ ALLOWED_EDIT_TYPES = ("brand_swap", "size_swap", "color_swap", "negation_flip", 
 ESCI_ORDER = {"I": 0, "C": 1, "S": 2, "E": 3}
 EXACT_PROB_THRESHOLD = 0.9
 
+CAUSAL_LABELER_SYSTEM_PROMPT = (
+    "You are labeling the expected ESCI relevance label of an EDITED query-item pair for a search ranking counterfactual. "
+    "Infer how the EDITED item should be labeled for the QUERY using ESCI categories (Exact, Substitute, Complement, Irrelevant). "
+    "Use 'unknown' only when genuinely ambiguous or insufficiently grounded. "
+    "Return strict JSON only."
+)
+CAUSAL_LABELER_INSTRUCTIONS = [
+    "Decide expected_edited_esci_label as one of: E, S, C, I, unknown.",
+    "Interpret E/S/C/I as Exact/Substitute/Complement/Irrelevant for the QUERY.",
+    "Provide expected_delta_direction relative to the ORIGINAL item as one of: up, down, neutral, unknown.",
+    "If original_esci_label_if_known is missing or unclear, infer the edited label anyway and use unknown for direction when needed.",
+    "Provide a short plain-English reason.",
+    "Provide confidence as one of: high, medium, low.",
+]
+CAUSAL_LABELER_JSON_SCHEMA = {
+    "expected_edited_esci_label": "E|S|C|I|unknown",
+    "expected_delta_direction": "up|down|neutral|unknown",
+    "expected_reason": "string",
+    "expected_confidence": "high|medium|low",
+}
+# Include post-processing semantics here because cache validity depends on both
+# prompt text and how we interpret model outputs.
+CAUSAL_LABELER_CACHE_SEMANTICS = {
+    "direction_resolution": "preserve_same_label_judge_direction_enforce_cross_label_ordinal",
+    "threshold_causal_mapping": "transition_based_inherited_fail_not_counted_as_introduced",
+}
+
+
+def _causal_labeler_prompt_contract_spec() -> dict[str, object]:
+    return {
+        "system_prompt": CAUSAL_LABELER_SYSTEM_PROMPT,
+        "instructions": CAUSAL_LABELER_INSTRUCTIONS,
+        "json_schema": CAUSAL_LABELER_JSON_SCHEMA,
+        "cache_semantics": CAUSAL_LABELER_CACHE_SEMANTICS,
+    }
+
+
+def _causal_labeler_prompt_version() -> str:
+    spec = _causal_labeler_prompt_contract_spec()
+    digest = hashlib.sha256(json.dumps(spec, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+    return f"causal_labeler_contract_{digest}"
+
 
 def _build_ssl_context() -> ssl.SSLContext | None:
     # Prefer certifi automatically on local macOS/Python installs where system trust can be misconfigured.
@@ -161,6 +203,30 @@ def _derive_expected_direction_from_transition(original_esci_label: str | None, 
     if ESCI_ORDER[new] < ESCI_ORDER[orig]:
         return "down"
     return "neutral"
+
+
+def _resolve_expected_direction(
+    original_esci_label: str | None,
+    expected_edited_esci_label: str | None,
+    parsed_expected_direction: object,
+) -> str | None:
+    """Reconcile coarse ESCI transition with the judge's directional expectation.
+
+    ESCI transitions are ordinal and coarse. A same-label transition (e.g., I->I)
+    does not imply zero score change, so preserve the judge's up/down/neutral
+    signal in that case. For cross-label transitions, enforce the ordinal
+    direction implied by the transition.
+    """
+    derived = _derive_expected_direction_from_transition(original_esci_label, expected_edited_esci_label)
+    parsed = _normalize_expected_direction(parsed_expected_direction)
+    if parsed == "unknown":
+        parsed = None
+
+    if derived in {"up", "down"}:
+        return derived
+    if derived == "neutral":
+        return parsed if parsed in {"up", "down", "neutral"} else "neutral"
+    return parsed
 
 
 def _compute_sign_consistency(expected_delta_direction: str | None, delta_margin: float) -> bool | None:
@@ -251,6 +317,73 @@ def _compute_threshold_check(expected_edited_esci_label: str | None, edited_prob
     return "pass" if edited_prob < threshold else "fail"
 
 
+def _compute_threshold_transition_status(
+    original_esci_label: str | None,
+    expected_edited_esci_label: str | None,
+    original_prob: float,
+    edited_prob: float,
+    threshold: float = EXACT_PROB_THRESHOLD,
+) -> tuple[str | None, str | None, str | None]:
+    """Return (original_abs_check, edited_abs_check, transition_status).
+
+    transition_status is causal-facing and distinguishes inherited baseline
+    failures from violations introduced by the edit.
+    """
+    orig_lbl = _normalize_esci_label(original_esci_label)
+    edited_lbl = _normalize_esci_label(expected_edited_esci_label)
+    original_check = _compute_threshold_check(orig_lbl, original_prob, threshold=threshold) if orig_lbl is not None else None
+    edited_check = _compute_threshold_check(edited_lbl, edited_prob, threshold=threshold) if edited_lbl is not None else None
+    if original_check is None and edited_check is None:
+        return original_check, edited_check, None
+    if original_check is None:
+        return original_check, edited_check, ("introduced_fail" if edited_check == "fail" else "edited_only_pass")
+    if edited_check is None:
+        return original_check, edited_check, "original_only_context"
+
+    if original_check == "pass" and edited_check == "pass":
+        return original_check, edited_check, "unchanged_pass"
+    if original_check == "pass" and edited_check == "fail":
+        return original_check, edited_check, "introduced_fail"
+    if original_check == "fail" and edited_check == "pass":
+        return original_check, edited_check, "resolved_fail"
+
+    # Both fail. If the exactness bucket (E vs non-E) is unchanged, this is
+    # clearly inherited baseline miscalibration rather than a new causal error.
+    same_exactness_bucket = (orig_lbl == "E") == (edited_lbl == "E")
+    if same_exactness_bucket:
+        return original_check, edited_check, "inherited_fail"
+    return original_check, edited_check, "persistent_fail_across_transition"
+
+
+def _compute_threshold_check_regression_aware(
+    original_esci_label: str | None,
+    expected_edited_esci_label: str | None,
+    original_prob: float,
+    edited_prob: float,
+    threshold: float = EXACT_PROB_THRESHOLD,
+) -> str | None:
+    """Avoid attributing inherited absolute-calibration failures to a same-class edit.
+
+    Example: original expected I and edited expected I, but both probabilities are
+    above the Exact threshold. The edit did not introduce the threshold violation;
+    the model was already miscalibrated on the original pair.
+    """
+    _orig_check, edited_status, transition_status = _compute_threshold_transition_status(
+        original_esci_label,
+        expected_edited_esci_label,
+        original_prob,
+        edited_prob,
+        threshold=threshold,
+    )
+    if edited_status is None:
+        return None
+    if transition_status == "introduced_fail":
+        return "fail"
+    if transition_status in {"inherited_fail", "persistent_fail_across_transition"}:
+        return "inherited_fail"
+    return edited_status
+
+
 def _compose_causal_result_v2(
     rank_movement_check: str | None,
     pairwise_order_check: str | None,
@@ -295,7 +428,7 @@ class OpenAICausalLabeler:
         self.timeout_s = float(timeout_s)
         self.max_retries = int(max_retries)
         self.cache_path = Path(cache_path)
-        self.prompt_version = "causal_labeler_v3_esci_transition"
+        self.prompt_version = _causal_labeler_prompt_version()
         self._cache: dict[str, CausalLabel] = {}
         self._cache_hits = 0
         self._cache_misses = 0
@@ -436,12 +569,7 @@ class OpenAICausalLabeler:
                 return cached
             self._cache_misses += 1
 
-        sys_prompt = (
-            "You are labeling the expected ESCI relevance label of an EDITED query-item pair for a search ranking counterfactual. "
-            "Infer how the EDITED item should be labeled for the QUERY using ESCI categories (Exact, Substitute, Complement, Irrelevant). "
-            "Use 'unknown' only when genuinely ambiguous or insufficiently grounded. "
-            "Return strict JSON only."
-        )
+        sys_prompt = CAUSAL_LABELER_SYSTEM_PROMPT
         user_prompt = {
             "task": "counterfactual_expected_edited_esci_label",
             "query": query,
@@ -449,20 +577,8 @@ class OpenAICausalLabeler:
             "edited_item_text": edited_text,
             "edit_type": edit_type,
             "original_esci_label_if_known": esci_label or None,
-            "instructions": [
-                "Decide expected_edited_esci_label as one of: E, S, C, I, unknown.",
-                "Interpret E/S/C/I as Exact/Substitute/Complement/Irrelevant for the QUERY.",
-                "Provide expected_delta_direction relative to the ORIGINAL item as one of: up, down, neutral, unknown.",
-                "If original_esci_label_if_known is missing or unclear, infer the edited label anyway and use unknown for direction when needed.",
-                "Provide a short plain-English reason.",
-                "Provide confidence as one of: high, medium, low.",
-            ],
-            "json_schema": {
-                "expected_edited_esci_label": "E|S|C|I|unknown",
-                "expected_delta_direction": "up|down|neutral|unknown",
-                "expected_reason": "string",
-                "expected_confidence": "high|medium|low",
-            },
+            "instructions": CAUSAL_LABELER_INSTRUCTIONS,
+            "json_schema": CAUSAL_LABELER_JSON_SCHEMA,
         }
         payload = {
             "model": self.model,
@@ -480,9 +596,11 @@ class OpenAICausalLabeler:
             raise RuntimeError(f"OpenAI causal labeling request failed: {exc}") from exc
 
         expected_edited_esci_label = _normalize_esci_label(parsed.get("expected_edited_esci_label"))
-        direction = _derive_expected_direction_from_transition(esci_label, expected_edited_esci_label)
-        if direction is None:
-            direction = _normalize_expected_direction(parsed.get("expected_delta_direction"))
+        direction = _resolve_expected_direction(
+            esci_label,
+            expected_edited_esci_label,
+            parsed.get("expected_delta_direction"),
+        )
         reason = parsed.get("expected_reason")
         conf = parsed.get("expected_confidence")
         if isinstance(reason, str):
@@ -819,7 +937,18 @@ def generate_counterfactual_results(
                     peers,
                     probe_id,
                 )
-                threshold_check = _compute_threshold_check(judgment.expected_edited_esci_label, edited_prob)
+                original_threshold_check, edited_threshold_check, threshold_change_status = _compute_threshold_transition_status(
+                    esci_label,
+                    judgment.expected_edited_esci_label,
+                    original_prob,
+                    edited_prob,
+                )
+                threshold_check = _compute_threshold_check_regression_aware(
+                    esci_label,
+                    judgment.expected_edited_esci_label,
+                    original_prob,
+                    edited_prob,
+                )
                 causal_result_v2, causal_result_reason = _compose_causal_result_v2(
                     rank_movement_check=rank_movement_check,
                     pairwise_order_check=pairwise_order_check,
@@ -864,6 +993,9 @@ def generate_counterfactual_results(
                         "pairwise_esci_order_check": pairwise_order_check,
                         "pairwise_esci_order_passes": pairwise_order_passes,
                         "pairwise_esci_order_fails": pairwise_order_fails,
+                        "original_threshold_check": original_threshold_check,
+                        "edited_threshold_check": edited_threshold_check,
+                        "threshold_change_status": threshold_change_status,
                         "threshold_check": threshold_check,
                         "threshold_policy": f"E>{EXACT_PROB_THRESHOLD:.1f}, non-E<{EXACT_PROB_THRESHOLD:.1f}",
                         "causal_result_v2": causal_result_v2,
