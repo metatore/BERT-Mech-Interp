@@ -226,6 +226,27 @@ def summarize_causal_results(causal_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.
     if causal_df is None or causal_df.empty:
         return pd.DataFrame(columns=["edit_type", "num_tests", "sign_consistency"]), pd.DataFrame()
     tmp = causal_df.copy()
+    if "causal_result_v2" in tmp.columns:
+        tmp = tmp[tmp["causal_result_v2"].notna()].copy()
+        if tmp.empty:
+            return pd.DataFrame(columns=["edit_type", "num_tests", "sign_consistency"]), pd.DataFrame()
+        tmp["is_fail"] = tmp["causal_result_v2"].map(lambda x: str(x).startswith("fail"))
+        tmp["is_pass"] = tmp["causal_result_v2"].map(lambda x: str(x) == "pass")
+        summary = (
+            tmp.groupby("edit_type")
+            .agg(
+                num_tests=("causal_result_v2", "count"),
+                sign_consistency=("is_fail", lambda s: float(1.0 - s.mean())),
+                strong_fail_rate=("is_fail", "mean"),
+                pass_rate_v2=("is_pass", "mean"),
+            )
+            .reset_index()
+            .sort_values(["strong_fail_rate", "num_tests"], ascending=[False, False])
+        )
+        worst = tmp[tmp["is_fail"]].copy()
+        if "delta_margin" in worst.columns:
+            worst = worst.assign(abs_delta_margin=worst["delta_margin"].abs()).sort_values("abs_delta_margin", ascending=False)
+        return summary, worst
     if "sign_consistent" not in tmp.columns:
         raise ValueError("Expected sign_consistent column in causal results.")
     tmp = tmp[tmp["sign_consistent"].notna()].copy()

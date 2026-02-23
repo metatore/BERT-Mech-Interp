@@ -327,6 +327,18 @@ def _build_payload(outputs_dir: Path) -> dict[str, object]:
                 "edited_prob",
                 "delta_prob",
                 "sign_consistent",
+                "original_esci_label",
+                "expected_edited_esci_label",
+                "expected_label_transition",
+                "original_rank_in_group",
+                "edited_rank_in_group",
+                "rank_delta_in_group",
+                "actual_rank_movement",
+                "rank_movement_check",
+                "pairwise_esci_order_check",
+                "threshold_check",
+                "causal_result_v2",
+                "causal_result_reason",
                 "expected_reason",
                 "expected_confidence",
                 "label_source",
@@ -369,6 +381,8 @@ def _build_payload(outputs_dir: Path) -> dict[str, object]:
                             "edited_text": str(r.get("edited_text", "")),
                             "question_tag": str(meta.get("question_tag", "")),
                             "expected_delta_direction": "" if pd.isna(r.get("expected_delta_direction")) else str(r.get("expected_delta_direction", "")),
+                            "expected_edited_esci_label": "" if pd.isna(r.get("expected_edited_esci_label")) else str(r.get("expected_edited_esci_label", "")),
+                            "expected_label_transition": "" if pd.isna(r.get("expected_label_transition")) else str(r.get("expected_label_transition", "")),
                             "expected_reason": "" if pd.isna(r.get("expected_reason")) else str(r.get("expected_reason", "")),
                             "expected_confidence": "" if pd.isna(r.get("expected_confidence")) else str(r.get("expected_confidence", "")),
                             "label_source": "" if pd.isna(r.get("label_source")) else str(r.get("label_source", "")),
@@ -377,29 +391,91 @@ def _build_payload(outputs_dir: Path) -> dict[str, object]:
                             "delta_prob": _safe_float(r.get("delta_prob", 0.0)),
                             "delta_margin": _safe_float(r.get("delta_margin", 0.0)),
                             "sign_consistent": _safe_nullable_bool(r.get("sign_consistent")),
+                            "causal_result_v2": "" if pd.isna(r.get("causal_result_v2")) else str(r.get("causal_result_v2", "")),
+                            "causal_result_reason": "" if pd.isna(r.get("causal_result_reason")) else str(r.get("causal_result_reason", "")),
+                            "threshold_check": "" if pd.isna(r.get("threshold_check")) else str(r.get("threshold_check", "")),
+                            "rank_movement_check": "" if pd.isna(r.get("rank_movement_check")) else str(r.get("rank_movement_check", "")),
+                            "pairwise_esci_order_check": "" if pd.isna(r.get("pairwise_esci_order_check")) else str(r.get("pairwise_esci_order_check", "")),
                         }
                     )
                 edit_examples_by_type[str(edit_type)] = ex_rows
 
-        labeled_causal = causal[causal["sign_consistent"].notna()].copy() if "sign_consistent" in causal.columns else pd.DataFrame()
-        if {"edit_type", "sign_consistent"}.issubset(labeled_causal.columns) and len(labeled_causal):
-            by_edit = (
-                labeled_causal.groupby("edit_type")["sign_consistent"]
-                .agg(num_tests="count", sign_consistency="mean")
-                .reset_index()
-                .sort_values(["sign_consistency", "num_tests"], ascending=[True, False])
-            )
-            for _, r in by_edit.iterrows():
-                failure_by_edit_type.append(
-                    {
-                        "edit_type": str(r["edit_type"]),
-                        "num_tests": int(r["num_tests"]),
-                        "sign_consistency": float(r["sign_consistency"]),
-                        "failure_rate": float(1.0 - float(r["sign_consistency"])),
-                    }
+        if {"edit_type", "causal_result_v2"}.issubset(causal.columns):
+            labeled_causal = causal[causal["causal_result_v2"].notna()].copy()
+            if len(labeled_causal):
+                labeled_causal["is_fail_v2"] = labeled_causal["causal_result_v2"].map(lambda x: str(x).startswith("fail"))
+                labeled_causal["is_pass_v2"] = labeled_causal["causal_result_v2"].map(lambda x: str(x) == "pass")
+                labeled_causal["is_fail_order_v2"] = labeled_causal["causal_result_v2"].map(lambda x: str(x) in {"fail_order", "fail_both"})
+                labeled_causal["is_fail_threshold_v2"] = labeled_causal["causal_result_v2"].map(lambda x: str(x) in {"fail_threshold", "fail_both"})
+                labeled_causal["is_fail_both_v2"] = labeled_causal["causal_result_v2"].map(lambda x: str(x) == "fail_both")
+                by_edit = (
+                    labeled_causal.groupby("edit_type")
+                    .agg(
+                        num_tests=("causal_result_v2", "count"),
+                        fail_rate=("is_fail_v2", "mean"),
+                        pass_rate=("is_pass_v2", "mean"),
+                        fail_order_rate=("is_fail_order_v2", "mean"),
+                        fail_threshold_rate=("is_fail_threshold_v2", "mean"),
+                        fail_both_rate=("is_fail_both_v2", "mean"),
+                        fail_order_count=("is_fail_order_v2", "sum"),
+                        fail_threshold_count=("is_fail_threshold_v2", "sum"),
+                        fail_both_count=("is_fail_both_v2", "sum"),
+                    )
+                    .reset_index()
+                    .sort_values(["fail_rate", "num_tests"], ascending=[False, False])
                 )
+                for _, r in by_edit.iterrows():
+                    failure_by_edit_type.append(
+                        {
+                            "edit_type": str(r["edit_type"]),
+                            "num_tests": int(r["num_tests"]),
+                            "sign_consistency": float(1.0 - float(r["fail_rate"])),
+                            "failure_rate": float(r["fail_rate"]),
+                            "fail_order_rate": float(r["fail_order_rate"]),
+                            "fail_threshold_rate": float(r["fail_threshold_rate"]),
+                            "fail_both_rate": float(r["fail_both_rate"]),
+                            "fail_order_count": int(r["fail_order_count"]),
+                            "fail_threshold_count": int(r["fail_threshold_count"]),
+                            "fail_both_count": int(r["fail_both_count"]),
+                            "summary_mode": "v2_failure_breakdown",
+                        }
+                    )
+        else:
+            labeled_causal = causal[causal["sign_consistent"].notna()].copy() if "sign_consistent" in causal.columns else pd.DataFrame()
+            if {"edit_type", "sign_consistent"}.issubset(labeled_causal.columns) and len(labeled_causal):
+                by_edit = (
+                    labeled_causal.groupby("edit_type")["sign_consistent"]
+                    .agg(num_tests="count", sign_consistency="mean")
+                    .reset_index()
+                    .sort_values(["sign_consistency", "num_tests"], ascending=[True, False])
+                )
+                for _, r in by_edit.iterrows():
+                    failure_by_edit_type.append(
+                        {
+                            "edit_type": str(r["edit_type"]),
+                            "num_tests": int(r["num_tests"]),
+                            "sign_consistency": float(r["sign_consistency"]),
+                            "failure_rate": float(1.0 - float(r["sign_consistency"])),
+                        }
+                    )
 
-        if {"sign_consistent", "delta_margin", "probe_id", "query", "edit_type"}.issubset(causal.columns):
+        if {"causal_result_v2", "delta_margin", "probe_id", "query", "edit_type"}.issubset(causal.columns):
+            wrong = causal[causal["causal_result_v2"].map(lambda x: str(x).startswith("fail"))].copy()
+            if len(wrong):
+                wrong["abs_delta_margin"] = wrong["delta_margin"].map(lambda x: abs(_safe_float(x)))
+                wrong = wrong.sort_values("abs_delta_margin", ascending=False).head(15)
+                wrong_direction_examples = [
+                    {
+                        "probe_id": str(r.get("probe_id", "")),
+                        "query": str(r.get("query", "")),
+                        "edit_type": str(r.get("edit_type", "")),
+                        "expected_delta_direction": "" if pd.isna(r.get("expected_delta_direction")) else str(r.get("expected_delta_direction", "")),
+                        "delta_margin": _safe_float(r.get("delta_margin", 0.0)),
+                        "sign_consistent": _safe_nullable_bool(r.get("sign_consistent")),
+                    }
+                    for _, r in wrong.iterrows()
+                ]
+        elif {"sign_consistent", "delta_margin", "probe_id", "query", "edit_type"}.issubset(causal.columns):
             wrong = causal[causal["sign_consistent"] == False].copy()  # noqa: E712
             if len(wrong):
                 wrong["abs_delta_margin"] = wrong["delta_margin"].map(lambda x: abs(_safe_float(x)))
@@ -419,7 +495,10 @@ def _build_payload(outputs_dir: Path) -> dict[str, object]:
         # Curated examples for non-technical quick entry.
         if "delta_margin" in causal.columns:
             causal["abs_delta_margin"] = causal["delta_margin"].map(lambda x: abs(_safe_float(x)))
-            if "sign_consistent" in causal.columns:
+            if "causal_result_v2" in causal.columns:
+                stable = causal[causal["causal_result_v2"] == "pass"].copy()
+                wrong = causal[causal["causal_result_v2"].map(lambda x: str(x).startswith("fail"))].copy()
+            elif "sign_consistent" in causal.columns:
                 stable = causal[causal["sign_consistent"] == True].copy()  # noqa: E712
                 wrong = causal[causal["sign_consistent"] == False].copy()  # noqa: E712
             else:
@@ -579,6 +658,33 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
     .controls {{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:6px 0 10px 0; }}
     .controls label {{ font-size:12px; color:var(--muted); }}
     .controls select {{ border:1px solid var(--line); border-radius:8px; padding:4px 8px; background:#fff; }}
+    .ui-select {{
+      border:1px solid var(--line);
+      border-radius:8px;
+      padding:6px 30px 6px 10px;
+      background:
+        linear-gradient(45deg, transparent 50%, #64748b 50%),
+        linear-gradient(135deg, #64748b 50%, transparent 50%),
+        linear-gradient(#fff, #fff);
+      background-position:
+        calc(100% - 16px) calc(50% - 2px),
+        calc(100% - 11px) calc(50% - 2px),
+        0 0;
+      background-size: 5px 5px, 5px 5px, 100% 100%;
+      background-repeat: no-repeat;
+      color: var(--text);
+      font-size: 13px;
+      line-height: 1.2;
+      appearance: none;
+      -webkit-appearance: none;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.7);
+    }}
+    .ui-select:hover {{ border-color:#cbd5e1; background-color:#fcfdff; }}
+    .ui-select:focus {{
+      outline: none;
+      border-color: #0ea5e9;
+      box-shadow: 0 0 0 3px rgba(14,165,233,0.15);
+    }}
     tr.warnrow td {{ background:#fff1f2; }}
     .small-note {{ font-size:12px; color:var(--muted); }}
     .mode-toggle {{ display:flex; align-items:center; gap:8px; margin: 0 0 12px 0; }}
@@ -701,7 +807,13 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
       </div>
       <div style=\"height:10px\"></div>
       <div>
-        <div class=\"muted\" id=\"failure-drilldown-label\">Edit type drilldown: click a row above to see individual examples</div>
+        <div style=\"display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;\">
+          <div class=\"muted\" id=\"failure-drilldown-label\">Edit type drilldown: click a row above to see individual examples</div>
+          <div class=\"muted\" style=\"display:flex; align-items:center; gap:8px;\">
+            <label for=\"failure-result-filter\">Result filter</label>
+            <select id=\"failure-result-filter\" class=\"ui-select\"></select>
+          </div>
+        </div>
         <div class=\"table-wrap\" id=\"failure-edit-drilldown\"></div>
       </div>
     </div>
@@ -992,6 +1104,13 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
         num_tests: Number(r.num_tests || 0),
         sign_consistency: Number(r.sign_consistency || 0),
         failure_rate: Number(r.failure_rate || 0),
+        fail_order_rate: r.fail_order_rate == null ? null : Number(r.fail_order_rate),
+        fail_threshold_rate: r.fail_threshold_rate == null ? null : Number(r.fail_threshold_rate),
+        fail_both_rate: r.fail_both_rate == null ? null : Number(r.fail_both_rate),
+        fail_order_count: r.fail_order_count == null ? null : Number(r.fail_order_count),
+        fail_threshold_count: r.fail_threshold_count == null ? null : Number(r.fail_threshold_count),
+        fail_both_count: r.fail_both_count == null ? null : Number(r.fail_both_count),
+        summary_mode: String(r.summary_mode || ""),
       }}));
       const wrong = (fb.wrong_direction_examples || []).map(r => ({{
         probe_id: r.probe_id,
@@ -1009,15 +1128,36 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
         return;
       }}
 
-      const head = `<thead><tr><th>Edit Type</th><th>Tests</th><th>Sign Consistency</th><th>Failure Rate</th></tr></thead>`;
-      const body = byEdit.map(r => `
-        <tr class="clickable" data-edit-type="${{escAttr(r.edit_type)}}">
-          <td>${{esc(r.edit_type)}}</td>
-          <td>${{r.num_tests}}</td>
-          <td>${{pct(r.sign_consistency)}}</td>
-          <td>${{pct(r.failure_rate)}}</td>
-        </tr>
-      `).join("");
+      const hasBreakdown = byEdit.some(r => r.summary_mode === "v2_failure_breakdown");
+      const head = hasBreakdown
+        ? `<thead><tr><th>Edit Type</th><th>Tests</th><th>Pass</th><th>Fail (Any)</th><th>Order Fail</th><th>Threshold Fail</th><th>Both</th></tr></thead>`
+        : `<thead><tr><th>Edit Type</th><th>Tests</th><th>Sign Consistency</th><th>Failure Rate</th></tr></thead>`;
+      const body = byEdit.map(r => {{
+        if (hasBreakdown) {{
+          const orderText = r.fail_order_rate == null ? "-" : `${{pct(r.fail_order_rate)}} (${{r.fail_order_count ?? 0}})`;
+          const thresholdText = r.fail_threshold_rate == null ? "-" : `${{pct(r.fail_threshold_rate)}} (${{r.fail_threshold_count ?? 0}})`;
+          const bothText = r.fail_both_rate == null ? "-" : `${{pct(r.fail_both_rate)}} (${{r.fail_both_count ?? 0}})`;
+          return `
+            <tr class="clickable" data-edit-type="${{escAttr(r.edit_type)}}">
+              <td>${{esc(r.edit_type)}}</td>
+              <td>${{r.num_tests}}</td>
+              <td>${{pct(1 - r.failure_rate)}}</td>
+              <td>${{pct(r.failure_rate)}}</td>
+              <td>${{orderText}}</td>
+              <td>${{thresholdText}}</td>
+              <td>${{bothText}}</td>
+            </tr>
+          `;
+        }}
+        return `
+          <tr class="clickable" data-edit-type="${{escAttr(r.edit_type)}}">
+            <td>${{esc(r.edit_type)}}</td>
+            <td>${{r.num_tests}}</td>
+            <td>${{pct(r.sign_consistency)}}</td>
+            <td>${{pct(r.failure_rate)}}</td>
+          </tr>
+        `;
+      }}).join("");
       byEditHost.innerHTML = `<table>${{head}}<tbody>${{body}}</tbody></table>`;
       byEditHost.querySelectorAll("tr[data-edit-type]").forEach(tr => {{
         tr.addEventListener("click", () => {{
@@ -1034,12 +1174,30 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
       const fb = data.failure_buckets || {{}};
       const host = document.getElementById("failure-edit-drilldown");
       const label = document.getElementById("failure-drilldown-label");
+      const filterEl = document.getElementById("failure-result-filter");
       const rows = fb.edit_examples_by_type?.[editType] || [];
+      const filterOptions = failureDrilldownFilterOptions(rows);
+      if (filterEl) {{
+        filterEl.innerHTML = filterOptions.map(o => `<option value="${{escAttr(o.value)}}">${{esc(o.label)}}</option>`).join("");
+        if (!filterOptions.some(o => o.value === selectedFailureResultFilter)) {{
+          selectedFailureResultFilter = "all";
+        }}
+        filterEl.value = selectedFailureResultFilter;
+        filterEl.onchange = () => {{
+          selectedFailureResultFilter = filterEl.value || "all";
+          renderFailureEditDrilldown(selectedFailureEditType);
+        }};
+      }}
       label.textContent = editType
         ? `Edit type drilldown: ${{editType}}`
         : "Edit type drilldown: click a row above to see individual examples";
       if (!rows.length) {{
         host.innerHTML = "<p class='muted' style='padding:8px'>No examples for this edit type.</p>";
+        return;
+      }}
+      const shown = rows.filter(r => matchesFailureDrilldownFilter(r, selectedFailureResultFilter));
+      if (!shown.length) {{
+        host.innerHTML = "<p class='muted' style='padding:8px'>No examples match this result filter.</p>";
         return;
       }}
       const head = `
@@ -1056,8 +1214,8 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
           </tr>
         </thead>
       `;
-      const body = rows.map((r, idx) => {{
-        const verdict = causalVerdict(r.sign_consistent);
+      const body = shown.map((r, idx) => {{
+        const verdict = causalVerdict(r);
         return `
           <tr class="clickable ${{verdict.state === 'fail' ? 'warnrow' : ''}}" data-drill-idx="${{idx}}" data-edit-type="${{escAttr(editType)}}">
             <td>${{esc(r.query || "")}}</td>
@@ -1075,7 +1233,7 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
       host.querySelectorAll("tr[data-drill-idx]").forEach(tr => {{
         tr.addEventListener("click", () => {{
           const i = Number(tr.getAttribute("data-drill-idx") || 0);
-          const chosen = rows[i] || {{}};
+          const chosen = shown[i] || {{}};
           jumpToProbe(chosen);
         }});
       }});
@@ -1140,7 +1298,19 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
       `;
     }}
 
-    function causalVerdict(signConsistent) {{
+    function causalVerdict(rowOrSignConsistent) {{
+      if (rowOrSignConsistent && typeof rowOrSignConsistent === "object") {{
+        const v2 = String(rowOrSignConsistent.causal_result_v2 || "");
+        if (v2 === "pass") return {{ state: "pass", label: "as expected", pillClass: "ok" }};
+        if (v2 === "marginal") return {{ state: "marginal", label: "marginal", pillClass: "" }};
+        if (v2 === "ambiguous") return {{ state: "unknown", label: "ambiguous", pillClass: "" }};
+        if (v2.startsWith("fail")) {{
+          if (v2 === "fail_threshold") return {{ state: "fail", label: "threshold-fail", pillClass: "bad" }};
+          if (v2 === "fail_both") return {{ state: "fail", label: "order+threshold", pillClass: "bad" }};
+          return {{ state: "fail", label: "order-fail", pillClass: "bad" }};
+        }}
+      }}
+      const signConsistent = rowOrSignConsistent;
       if (signConsistent === true) return {{ state: "pass", label: "as expected", pillClass: "ok" }};
       if (signConsistent === false) return {{ state: "fail", label: "wrong-direction", pillClass: "bad" }};
       return {{ state: "unknown", label: "unjudged", pillClass: "" }};
@@ -1172,18 +1342,26 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
         host.innerHTML = "<strong>What this means:</strong> No causal test rows for this example yet.";
         return;
       }}
-      const labeled = rows.filter(r => r.sign_consistent === true || r.sign_consistent === false);
+      const hasV2 = rows.some(r => String(r.causal_result_v2 || "").length > 0);
+      const labeled = hasV2
+        ? rows.filter(r => String(r.causal_result_v2 || "") !== "" && String(r.causal_result_v2 || "") !== "ambiguous")
+        : rows.filter(r => r.sign_consistent === true || r.sign_consistent === false);
       if (!labeled.length) {{
         host.innerHTML = "<strong>What this means:</strong> Score changes are shown, but expected-direction labels are disabled. Regenerate counterfactuals with an OpenAI API key to mark edits as expected vs wrong-direction.";
         return;
       }}
-      const wrong = labeled.filter(r => r.sign_consistent === false);
+      const wrong = hasV2
+        ? labeled.filter(r => String(r.causal_result_v2 || "").startsWith("fail"))
+        : labeled.filter(r => r.sign_consistent === false);
       const best = labeled.slice().sort((a,b) => Number(b.abs_delta_margin || 0) - Number(a.abs_delta_margin || 0))[0];
       if (wrong.length) {{
         const worst = wrong.slice().sort((a,b) => Number(b.abs_delta_margin || 0) - Number(a.abs_delta_margin || 0))[0];
+        const expectedText = worst.expected_label_transition
+          ? `${{worst.expected_label_transition}} (${{String(worst.expected_delta_direction || "unknown")}})`
+          : String(worst.expected_delta_direction || "unknown");
         host.innerHTML = `
           <strong>What this means:</strong> This example has a concern. After a <strong>${{esc(worst.edit_type)}}</strong> change, the model moved in the wrong direction.<br>
-          <span class="muted">Expected: ${{esc(worst.expected_delta_direction)}} | Actual change: ${{Number(worst.delta_margin || 0).toFixed(3)}} margin.</span>
+          <span class="muted">Expected: ${{esc(expectedText)}} | Actual change: ${{Number(worst.delta_margin || 0).toFixed(3)}} margin.</span>
         `;
       }} else {{
         host.innerHTML = `
@@ -1253,7 +1431,49 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
     let selectedProbe = null;
     let selectedCausalFilter = "all";
     let selectedFailureEditType = "";
+    let selectedFailureResultFilter = "all";
     let beginnerMode = true;
+
+    function failureDrilldownFilterOptions(rows) {{
+      const hasV2 = (rows || []).some(r => String(r.causal_result_v2 || "") !== "");
+      if (hasV2) {{
+        return [
+          {{ value: "all", label: "All results" }},
+          {{ value: "fail_any", label: "Failures only" }},
+          {{ value: "fail_order", label: "Order failures" }},
+          {{ value: "fail_threshold", label: "Threshold failures" }},
+          {{ value: "fail_both", label: "Both (order+threshold)" }},
+          {{ value: "marginal", label: "Marginal" }},
+          {{ value: "pass", label: "Pass" }},
+          {{ value: "ambiguous", label: "Ambiguous" }},
+        ];
+      }}
+      return [
+        {{ value: "all", label: "All results" }},
+        {{ value: "fail_any", label: "Failures only" }},
+        {{ value: "pass", label: "Pass" }},
+        {{ value: "unjudged", label: "Unjudged" }},
+      ];
+    }}
+
+    function matchesFailureDrilldownFilter(row, mode) {{
+      if (!mode || mode === "all") return true;
+      const v2 = String(row.causal_result_v2 || "");
+      if (v2) {{
+        if (mode === "fail_any") return v2.startsWith("fail");
+        if (mode === "fail_order") return v2 === "fail_order" || v2 === "fail_both";
+        if (mode === "fail_threshold") return v2 === "fail_threshold" || v2 === "fail_both";
+        if (mode === "fail_both") return v2 === "fail_both";
+        if (mode === "marginal") return v2 === "marginal";
+        if (mode === "pass") return v2 === "pass";
+        if (mode === "ambiguous") return v2 === "ambiguous";
+        return true;
+      }}
+      if (mode === "fail_any") return row.sign_consistent === false;
+      if (mode === "pass") return row.sign_consistent === true;
+      if (mode === "unjudged") return !(row.sign_consistent === true || row.sign_consistent === false);
+      return true;
+    }}
 
     function renderCausalTests(probeId) {{
       const filter = document.getElementById("causal-edit-filter");
@@ -1300,7 +1520,7 @@ def build_dashboard(outputs_dir: Path, out_html: Path) -> Path:
           </thead>
         `;
       const body = shown.map(r => {{
-        const verdict = causalVerdict(r.sign_consistent);
+        const verdict = causalVerdict(r);
         if (beginnerMode) {{
           const dm = Number(r.delta_margin || 0);
           const reaction = dm > 0 ? "Score went up" : (dm < 0 ? "Score went down" : "No change");

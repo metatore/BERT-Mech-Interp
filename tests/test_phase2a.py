@@ -197,6 +197,7 @@ class Phase2ATests(unittest.TestCase):
                     expected_reason="test",
                     expected_confidence="high",
                     label_source="test_judge",
+                    expected_edited_esci_label="S",
                 )
 
         bundle = ModelBundle(
@@ -224,6 +225,10 @@ class Phase2ATests(unittest.TestCase):
         self.assertTrue(out["expected_delta_direction"].isin({"up", "down", "neutral"}).all())
         self.assertTrue(out["sign_consistent"].map(lambda x: isinstance(x, (bool, np.bool_))).all())
         self.assertTrue((out["label_source"] == "test_judge").all())
+        self.assertIn("expected_edited_esci_label", out.columns)
+        self.assertIn("threshold_check", out.columns)
+        self.assertIn("causal_result_v2", out.columns)
+        self.assertTrue(out["expected_edited_esci_label"].isin({"E", "S", "C", "I"}).all())
 
     def test_counterfactual_labels_disabled_without_labeler(self):
         bundle = ModelBundle(
